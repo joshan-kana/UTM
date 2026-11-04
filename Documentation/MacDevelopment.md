@@ -14,6 +14,26 @@ Alternatively, run the following after cloning if you did not do a recursive clo
 git submodule update --init --recursive
 ```
 
+## Nix development environment
+
+The optional Nix flake supplies pinned command-line build tools on Apple Silicon macOS:
+
+```sh
+nix develop
+```
+
+Xcode and its Metal toolchain are still required and are provided by Apple, not
+Nix. UTM's native dependency sysroot is also required: download the matching
+`Sysroot-macos-arm64` or `Sysroot-macos-x86_64` artifact from the project's
+GitHub Actions build and unpack it at the repository root, as described below.
+Then build with `./scripts/build_utm.sh` as usual.
+
+This flake currently provides a development shell, not a packaged application.
+A source-backed Nix package will require a stable, hash-pinned native dependency
+sysroot or a reproducible build of those dependencies. For now, use UTM's
+standard build and packaging scripts; do not treat a nixpkgs UTM DMG as a build
+of this repository.
+
 ## Dependencies
 
 The easy way is to get the prebuilt dependencies from [GitHub Actions][1]. Pick the latest release and download all of the `Sysroot-macos-*` artifacts. You need to be logged in to GitHub to download artifacts. If you only intend to run locally, it is alright to just download the sysroot for your architecture. After downloading the prebuilt artifacts of your choice, extract them to the root directory where you cloned the repository.
