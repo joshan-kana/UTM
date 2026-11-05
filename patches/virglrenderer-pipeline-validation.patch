@@ -1,0 +1,21 @@
+diff --git a/src/venus/vkr_command_buffer.c b/src/venus/vkr_command_buffer.c
+index dc42c5a..01307b0 100644
+--- a/src/venus/vkr_command_buffer.c
++++ b/src/venus/vkr_command_buffer.c
+@@ -142,9 +142,15 @@ vkr_dispatch_vkEndCommandBuffer(UNUSED struct vn_dispatch_context *dispatch,
+ }
+ 
+ static void
+-vkr_dispatch_vkCmdBindPipeline(UNUSED struct vn_dispatch_context *dispatch,
++vkr_dispatch_vkCmdBindPipeline(struct vn_dispatch_context *dispatch,
+                                struct vn_command_vkCmdBindPipeline *args)
+ {
++   if (unlikely(args->pipeline == VK_NULL_HANDLE)) {
++      vkr_log("vkCmdBindPipeline: cannot bind a null pipeline");
++      vkr_context_set_fatal(dispatch->data);
++      return;
++   }
++
+    VKR_CMD_CALL(CmdBindPipeline, args, args->pipelineBindPoint, args->pipeline);
+ }
+ 
