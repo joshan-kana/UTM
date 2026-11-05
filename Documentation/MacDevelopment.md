@@ -28,11 +28,22 @@ Nix. UTM's native dependency sysroot is also required: download the matching
 GitHub Actions build and unpack it at the repository root, as described below.
 Then build with `./scripts/build_utm.sh` as usual.
 
-This flake currently provides a development shell, not a packaged application.
-A source-backed Nix package will require a stable, hash-pinned native dependency
-sysroot or a reproducible build of those dependencies. For now, use UTM's
-standard build and packaging scripts; do not treat a nixpkgs UTM DMG as a build
-of this repository.
+The flake also packages a pinned release of this fork's own compiled UTM app:
+
+```sh
+nix build .#default
+```
+
+The output contains `Applications/UTM.app` and command-line wrappers, using the
+existing nixpkgs UTM packaging procedure. The DMG is built separately with the
+native Xcode toolchain, published as a tagged release of this repository, and
+verified by its Nix content hash. `nix build` does not compile the Xcode project.
+
+The preview DMG is produced with `package_mac.sh unsigned` and is suitable
+for testing without a paid signing profile. It omits provisioned capabilities
+such as USB passthrough and bridged networking, so it is not a substitute for
+a fully signed release. Verify hardware virtualization and guest rendering
+with the final packaged app before deploying it as the default hypervisor.
 
 ## Dependencies
 
