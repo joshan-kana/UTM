@@ -1,0 +1,96 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index 2b291113..5099227b 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -1950,7 +1950,9 @@ void CompilerMSL::emit_mesh_wrapper()
+ 		statement("int32_t indexSize;");
+ 		statement("int64_t indexBuffer;");
+ 		statement("uint32_t vertexStrides[31];");
++		statement("uint32_t firstVertex;");
+ 		statement("uint8_t topoStrip;");
++		statement("uint8_t topoFan;");
+ 
+ 		end_scope(";");
+ 
+@@ -1996,13 +1998,13 @@ void CompilerMSL::emit_mesh_wrapper()
+ 		else if (msl_options.input_primitive_type == Options::PrimitiveTopology::Triangles)
+ 		{
+ 			statement("int startingIndex = positionInGrid.x;");
+-			statement("if (drawInfo->topoStrip) startingIndex *= 3;");
++			statement("if (!drawInfo->topoStrip) startingIndex *= 3;");
+ 			statement("int vertexCount = 3;");
+ 		}
+ 		else if (msl_options.input_primitive_type == Options::PrimitiveTopology::Lines)
+ 		{
+ 			statement("int startingIndex = positionInGrid.x;");
+-			statement("if (drawInfo->topoStrip) startingIndex *= 2;");
++			statement("if (!drawInfo->topoStrip) startingIndex *= 2;");
+ 			statement("int vertexCount = 2;");
+ 		}
+ 		else if (msl_options.input_primitive_type == Options::PrimitiveTopology::LineStrip)
+@@ -2025,30 +2027,31 @@ void CompilerMSL::emit_mesh_wrapper()
+ 		statement("for (int i = 0; i < vertexCount; ++i)");
+ 		begin_scope();
+ 		statement("uint vertexIndex;");
++		statement("uint indexPosition = drawInfo->topoFan ? (i == 0 ? 0 : positionInGrid.x + i) : startingIndex + i;");
+ 
+ 		statement("if (drawInfo->indexed)");
+ 		begin_scope();
+ 
+ 		statement(R"END(
+ 		if (drawInfo->indexSize == 1) {
+-			vertexIndex = ((constant uchar *)drawInfo->indexBuffer)[startingIndex + i];
++			vertexIndex = ((constant uchar *)drawInfo->indexBuffer)[indexPosition];
+ 			if (vertexIndex == 0xff) {
+ 				return;
+ 			}
+ 		} else if (drawInfo->indexSize == 2) {
+-			vertexIndex = ((constant ushort *)drawInfo->indexBuffer)[startingIndex + i];
++			vertexIndex = ((constant ushort *)drawInfo->indexBuffer)[indexPosition];
+ 			if (vertexIndex == 0xffff) {
+ 				return;
+ 			}
+ 		} else {
+-			vertexIndex = ((constant uint *)drawInfo->indexBuffer)[startingIndex + i];
++			vertexIndex = ((constant uint *)drawInfo->indexBuffer)[indexPosition];
+ 			if (vertexIndex == 0xffffffff) {
+ 				return;
+ 			}
+ 		})END");
+ 
+ 		end_scope();
+-		statement("else vertexIndex = startingIndex + i;");
++		statement("else vertexIndex = indexPosition + (drawInfo->topoFan ? drawInfo->firstVertex : 0);");
+ 
+ 		if (stage_in_var_id)
+ 		{
+@@ -2280,6 +2283,11 @@ void CompilerMSL::emit_mesh_wrapper()
+ 			if (is_hidden_variable(var, true))
+ 				return;
+ 
++			// The primitive ID belongs to the mesh grid, not the vertex payload.
++			if (is_builtin_variable(var) &&
++			    get_decoration(id, DecorationBuiltIn) == BuiltInPrimitiveId)
++				return;
++
+ 			statement("if (i < sizeof(", name, ") / sizeof(", name, "[0]))");
+ 			statement("\t", name, "[i] = out.", name, ";");
+ 		});
+@@ -2305,6 +2313,17 @@ void CompilerMSL::emit_mesh_wrapper()
+ 		for (auto &resource : resources)
+ 			statement(", ", resource.name);
+ 
++		// Each mesh threadgroup processes one input primitive. Forward its index
++		// to geometry shaders that read the PrimitiveId builtin.
++		ir.for_each_typed_id<SPIRVariable>([&](uint32_t id, SPIRVariable &var)
++		{
++			if (var.storage == StorageClassInput && is_builtin_variable(var) &&
++			    interface_variable_exists_in_entry_point(id) &&
++			    !is_hidden_variable(var, true) &&
++			    get_decoration(id, DecorationBuiltIn) == BuiltInPrimitiveId)
++				statement(", tid");
++		});
++
+ 		statement(");");
+ 		end_scope();
+ 	}

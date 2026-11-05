@@ -834,7 +834,16 @@ patch_vulkan_icd() {
 }
 
 build_moltenvk() {
-    pushd "$BUILD_DIR/MoltenVK.git"
+    MVK_BUILD_DIR="$(realpath "$BUILD_DIR")"
+    MVK_DIR="$MVK_BUILD_DIR/MoltenVK.git"
+    SPIRV_CROSS_PATCHED="$MVK_BUILD_DIR/SPIRV-Cross-patched"
+    if [ ! -d "$SPIRV_CROSS_PATCHED/.git" ]; then
+        git clone -q --no-hardlinks "$MVK_DIR/External/SPIRV-Cross" "$SPIRV_CROSS_PATCHED"
+    fi
+    git -C "$SPIRV_CROSS_PATCHED" checkout -f "$(cat "$MVK_DIR/ExternalRevisions/SPIRV-Cross_repo_revision")"
+    git -C "$SPIRV_CROSS_PATCHED" apply "$PATCHES_DIR/spirv-cross-geometry.patch"
+
+    pushd "$MVK_DIR"
     # for xcpretty if installed
     if which ruby >/dev/null && which gem >/dev/null; then
         PATH="$(ruby -r rubygems -e 'puts Gem.user_dir')/bin:$PATH"
@@ -859,7 +868,10 @@ build_moltenvk() {
         MVK_PLATFORM="macos"
         ;;
     esac
-    env -i PATH=$PATH HOME=$HOME LANG=en_US.UTF-8 ./fetchDependencies --$MVK_PLATFORM -v
+    env -i PATH=$PATH HOME=$HOME LANG=en_US.UTF-8 ./fetchDependencies --$MVK_PLATFORM --spirv-cross-root "$SPIRV_CROSS_PATCHED" -v
+    if ! git apply --reverse --check "$PATCHES_DIR/moltenvk-geometry-fan.patch" >/dev/null 2>&1; then
+        git apply "$PATCHES_DIR/moltenvk-geometry-fan.patch"
+    fi
     env -i PATH=$PATH HOME=$HOME LANG=en_US.UTF-8 make $MVK_PLATFORM$DEBUG_FLAGS
     if [ "$PLATFORM" == "macos" ]; then
         $(xcrun --sdk $SDK --find lipo) "Package/$BUILD_CONFIGURATION/MoltenVK/dylib/macOS/libMoltenVK.dylib" -extract $ARCH -output "$PREFIX/lib/libMoltenVK.dylib"
