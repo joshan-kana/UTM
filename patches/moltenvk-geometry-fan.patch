@@ -1,0 +1,78 @@
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+index 245404bf..3be3efce 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+@@ -165,7 +165,9 @@ struct DrawInfo {
+ 	int32_t indexSize;
+ 	uint64_t indexBuffer;
+ 	uint32_t vertexStrides[kMVKMaxBufferCount];
++	uint32_t firstVertex;
+ 	uint8_t topoStrip;
++	uint8_t topoFan;
+ };
+ 
+ static_assert(kMVKMaxBufferCount == 31,
+@@ -261,8 +263,10 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
+ 	auto& mtlFeats = cmdEncoder->getMetalFeatures();
+ 	auto& dvcLimits = cmdEncoder->getDeviceProperties().limits;
+ 
+-	// Metal doesn't support triangle fans, so encode it as triangles via an indexed indirect triangles command instead.
+-	if (pipeline->getVkPrimitiveTopology() == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) {
++	// Preserve the indirect fallback for regular triangle fans. A geometry
++	// pipeline uses mesh threadgroups, which cannot consume that indirect draw.
++	if (pipeline->getVkPrimitiveTopology() == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &&
++	    !pipeline->isGeometryPipeline()) {
+ 		encodeIndexedIndirect(cmdEncoder);
+ 		return;
+ 	}
+@@ -392,10 +396,16 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
+                 } else if (pipeline->isGeometryPipeline()) {
+ 					DrawInfo drawInfo = {};
+ 
+-
+ 					auto primitiveType = cmdEncoder->getMtlGraphics().getPrimitiveType();
+ 					int threadCount = 0;
+-					if (primitiveType == MTLPrimitiveTypePoint) {
++					if (pipeline->getVkPrimitiveTopology() == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) {
++						if (_vertexCount < 3) { return; }
++						// Generate the fan indices in the object shader to avoid staging
++						// a temporary index buffer on every draw.
++						drawInfo.topoFan = true;
++						drawInfo.firstVertex = _firstVertex;
++						threadCount = _vertexCount - 2;
++					} else if (primitiveType == MTLPrimitiveTypePoint) {
+ 						threadCount = _vertexCount;
+ 					} else if (primitiveType == MTLPrimitiveTypeLine) {
+ 						threadCount = _vertexCount / 2;
+@@ -411,7 +421,7 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
+ 						reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "Unsupported primitive type: %lu", primitiveType);
+ 					}
+ 
+-					if (_firstVertex) reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "First vertex not supported yet.");
++					if (_firstVertex && !drawInfo.topoFan) reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "First vertex not supported yet.");
+ 					if (_firstInstance) reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "First instance not supported yet.");
+ 
+ 					setGeometryVertexStrides(drawInfo, cmdEncoder, pipeline);
+@@ -508,7 +518,8 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
+ 	auto& dvcLimits = cmdEncoder->getDeviceProperties().limits;
+ 
+ 	// Metal doesn't support triangle fans, so encode it as triangles via an indexed indirect triangles command instead.
+-	if (pipeline->getVkPrimitiveTopology() == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) {
++	if (pipeline->getVkPrimitiveTopology() == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &&
++	    !pipeline->isGeometryPipeline()) {
+ 		encodeIndexedIndirect(cmdEncoder);
+ 		return;
+ 	}
+@@ -686,7 +697,11 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
+ 
+ 					auto primitiveType = cmdEncoder->getMtlGraphics().getPrimitiveType();
+ 					int threadCount = 0;
+-					if (primitiveType == MTLPrimitiveTypePoint) {
++					if (pipeline->getVkPrimitiveTopology() == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) {
++						if (_indexCount < 3) { return; }
++						drawInfo.topoFan = true;
++						threadCount = _indexCount - 2;
++					} else if (primitiveType == MTLPrimitiveTypePoint) {
+ 						threadCount = _indexCount;
+ 					} else if (primitiveType == MTLPrimitiveTypeLine) {
+ 						threadCount = _indexCount / 2;
