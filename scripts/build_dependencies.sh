@@ -210,6 +210,7 @@ download_all () {
     download $SPICE_CLIENT_SRC
     download $ZSTD_SRC
     download $SLIRP_SRC
+    printf "%s  %s\n" "$SLIRP_SHA256" "$BUILD_DIR/$(basename "$SLIRP_SRC")" | shasum -a 256 -c -
     download $QEMU_SRC
     if [ -z "$SKIP_USB_BUILD" ]; then
         download $USB_SRC
