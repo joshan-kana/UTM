@@ -92,7 +92,7 @@ if [ ! -z "$TEAM_IDENTIFIER" ]; then
 fi
 
 xcodebuild archive -archivePath "$OUTPUT" -scheme "$SCHEME" -destination "generic/platform=$PLATFORM" ARCHS="$ARCH" -configuration Release -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO $TEAM_IDENTIFIER_PREFIX
-BUILT_PATH=$(find $OUTPUT.xcarchive -name '*.app' -type d | head -1)
+BUILT_PATH=$(find "$OUTPUT.xcarchive" -name '*.app' -type d | head -1)
 # Only retain the target architecture to address < iOS 15 crash & save disk space
 if [ "$SDK" == "iphoneos" ]; then
     find "$BUILT_PATH" -type f -path '*/Frameworks/*.dylib' | while read FILE; do
