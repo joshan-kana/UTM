@@ -1,0 +1,45 @@
+diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
+index 7ea111b..db841d9 100644
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -9793,6 +9793,40 @@ static int vrend_renderer_transfer_write_iov(struct vrend_context *ctx,
+                                          info->box->width, info->box->height,
+                                          glformat, comp_size, data);
+             } else {
++#ifdef __APPLE__
++               /* Upload large contiguous images through Metal's buffer blit path
++                * rather than making ANGLE copy the image into texture storage. */
++               bool uploaded_from_buffer = false;
++               if (vrend_state.use_gles && epoxy_gl_version() >= 30 &&
++                   res->target == GL_TEXTURE_2D &&
++                   info->box->depth == 1 &&
++                   elsize == 4 &&
++                   send_size >= 1024 * 1024 && send_size <= INT_MAX &&
++                   stride == (uint64_t)info->box->width * elsize &&
++                   gltype == GL_UNSIGNED_BYTE &&
++                   (glformat == GL_RGBA || glformat == GL_BGRA)) {
++                  GLuint unpack_buffer = 0;
++                  glGenBuffers(1, &unpack_buffer);
++                  if (unpack_buffer) {
++                     GLint previous_buffer = 0;
++                     GLint allocated_size = 0;
++                     glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &previous_buffer);
++                     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, unpack_buffer);
++                     glBufferData(GL_PIXEL_UNPACK_BUFFER, (GLsizeiptr)send_size, data,
++                                  GL_STREAM_DRAW);
++                     glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_SIZE, &allocated_size);
++                     if (allocated_size == (GLint)send_size) {
++                        glTexSubImage2D(res->target, info->level, x, y,
++                                        info->box->width, info->box->height,
++                                        glformat, gltype, NULL);
++                        uploaded_from_buffer = true;
++                     }
++                     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)previous_buffer);
++                     glDeleteBuffers(1, &unpack_buffer);
++                  }
++               }
++               if (!uploaded_from_buffer)
++#endif
+                glTexSubImage2D(res->target, info->level, x, res->target == GL_TEXTURE_1D_ARRAY ? info->box->z : y,
+                                info->box->width,
+                                res->target == GL_TEXTURE_1D_ARRAY ? info->box->depth : info->box->height,

@@ -802,6 +802,12 @@ build_qemu_dependencies () {
     if ! git -C "$VIRGL_DIR" apply --reverse --check "$VIRGL_PATCH" >/dev/null 2>&1; then
         git -C "$VIRGL_DIR" apply "$VIRGL_PATCH"
     fi
+    if [ "$PLATFORM" == "macos" ]; then
+        VIRGL_METAL_PATCH="$PATCHES_DIR/virglrenderer-metal-pbo-upload.patch"
+        if ! git -C "$VIRGL_DIR" apply --reverse --check "$VIRGL_METAL_PATCH" >/dev/null 2>&1; then
+            git -C "$VIRGL_DIR" apply "$VIRGL_METAL_PATCH"
+        fi
+    fi
     meson_darwin_build $VIRGLRENDERER_REPO -Dtests=false -Dcheck-gl-errors=false -Dvenus=true -Dneptune=true -Dvulkan-dload=false -Drender-server-mode="$VIRGL_RENDER_SERVER_MODE"
     # Hypervisor for iOS
     if [ "$PLATFORM" == "ios" ] || [ "$PLATFORM" == "ios_simulator" ]; then
