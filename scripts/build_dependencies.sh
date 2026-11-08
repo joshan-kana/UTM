@@ -129,6 +129,9 @@ download () {
         retry curl -f -L -O "$URL"
         mv "$FILE" "$TARGET"
     fi
+    if [ -n "${2:-}" ]; then
+        printf "%s  %s\n" "$2" "$TARGET" | shasum -a 256 -c - || return 1
+    fi
     if [ -d "$DIR" ]; then
         echo "${GREEN}Deleting existing build directory ${DIR}...${NC}"
         rm -rf "$DIR"
@@ -209,7 +212,7 @@ download_all () {
     download $PHODAV_SRC
     download $SPICE_CLIENT_SRC
     download $ZSTD_SRC
-    download $SLIRP_SRC
+    download "$SLIRP_SRC" "$SLIRP_SHA256"
     download $QEMU_SRC
     if [ -z "$SKIP_USB_BUILD" ]; then
         download $USB_SRC
