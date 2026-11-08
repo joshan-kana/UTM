@@ -1,0 +1,93 @@
+diff --git a/src/kosmickrisp/vulkan/kk_image.c b/src/kosmickrisp/vulkan/kk_image.c
+--- a/src/kosmickrisp/vulkan/kk_image.c
++++ b/src/kosmickrisp/vulkan/kk_image.c
+@@ -582,7 +582,9 @@
+                       VkImageCreateFlags create_flags,
+                       const VkAllocationCallbacks *pAllocator)
+ {
+-   if (plane->shadow) {
++   if (plane->shadow_heap != NULL) {
++      kk_device_remove_heap_from_residency_set(dev, plane->shadow_heap);
++   } else if (plane->shadow) {
+       if (plane->mtl_handle != NULL)
+          kk_device_remove_texture_from_residency_set(dev, plane->mtl_handle);
+       if (plane->mtl_handle_array != NULL)
+@@ -593,6 +595,8 @@
+       mtl_release(plane->mtl_handle);
+    if (plane->mtl_handle_array != NULL)
+       mtl_release(plane->mtl_handle_array);
++   if (plane->shadow_heap != NULL)
++      mtl_release(plane->shadow_heap);
+ }
+ 
+ static void
+@@ -851,6 +855,8 @@
+     * optimal-tiled image memory are opaque, so nothing can observe that the
+     * texture does not live in the memory. */
+    if (plane->mem->bo->mtl_handle == NULL) {
++      if (plane->shadow_heap != NULL)
++         return mtl_new_texture_with_descriptor(plane->shadow_heap, layout, 0u);
+       mtl_texture *texture =
+          mtl_new_texture_with_descriptor_private(dev->mtl_handle, layout);
+       if (texture != NULL)
+@@ -876,6 +882,24 @@
+    plane->mem = mem;
+    plane->mem_offset_B = *offset_B;
+    plane->shadow = !plane->layout.linear && mem->bo->mtl_handle == NULL;
++   if (plane->shadow && plane->layout.type == MTL_TEXTURE_TYPE_3D &&
++       (image->vk.create_flags &
++        (VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT |
++         VK_IMAGE_CREATE_2D_VIEW_COMPATIBLE_BIT_EXT))) {
++      struct kk_image_layout array_layout = plane->layout;
++      array_layout.type = MTL_TEXTURE_TYPE_2D_ARRAY;
++      array_layout.layers *= array_layout.depth_px;
++      array_layout.depth_px = 1u;
++      uint64_t array_size_B;
++      mtl_heap_texture_size_and_align_with_descriptor(
++         dev->mtl_handle, &array_layout, &array_size_B, NULL);
++      plane->shadow_heap =
++         mtl_new_heap(dev->mtl_handle, MAX2(plane_size_B, array_size_B),
++                      KK_MTL_RESOURCE_OPTIONS);
++      if (plane->shadow_heap == NULL)
++         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      kk_device_add_heap_to_residency_set(dev, plane->shadow_heap);
++   }
+    plane->mtl_handle =
+       kk_image_plane_create_texture(dev, plane, &plane->layout, 0u);
+    if (plane->mtl_handle == NULL)
+@@ -895,11 +919,12 @@
+       array_layout.type = MTL_TEXTURE_TYPE_2D_ARRAY;
+       array_layout.layers = array_layout.layers * array_layout.depth_px;
+       array_layout.depth_px = 1u;
+-      /* A shadow plane cannot alias the 3D texture; the 2D array is a
+-       * separate allocation (TODO_KOSMICKRISP: keep them in sync). */
++      /* The shadow heap makes the 3D texture and 2D-array view alias. */
+       plane->mtl_handle_array =
+          kk_image_plane_create_texture(dev, plane, &array_layout, 0u);
+-      if (plane->mtl_handle_array != NULL && image->vk.base.object_name)
++      if (plane->mtl_handle_array == NULL)
++         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      if (image->vk.base.object_name)
+          mtl_resource_set_label(plane->mtl_handle_array,
+                                 image->vk.base.object_name);
+    }
+diff --git a/src/kosmickrisp/vulkan/kk_image.h b/src/kosmickrisp/vulkan/kk_image.h
+--- a/src/kosmickrisp/vulkan/kk_image.h
++++ b/src/kosmickrisp/vulkan/kk_image.h
+@@ -39,12 +39,14 @@
+    mtl_texture *mtl_handle;
+    /* Metal handle with 2D array type for 3D images */
+    mtl_texture *mtl_handle_array;
++   /* Synthetic heap for aliased 3D and 2D-array views of imported memory. */
++   mtl_heap *shadow_heap;
+    uint64_t addr;
+    /* The textures are standalone device allocations instead of placements in
+     * the memory's heap: the memory was imported from a host pointer, which
+     * only backs an MTLBuffer. Legal for optimal tiling since the memory
+-    * contents are opaque, but the textures cannot alias the memory, each
+-    * other, or subresource reinterpretations. */
++    * contents are opaque. Compatible 3D/2D-array views share shadow_heap
++    * to retain their normal aliasing behavior. */
+    bool shadow;
+ };
+ 
