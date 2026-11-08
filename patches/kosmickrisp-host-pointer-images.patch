@@ -1,0 +1,230 @@
+diff --git a/src/kosmickrisp/bridge/mtl_device.h b/src/kosmickrisp/bridge/mtl_device.h
+index 26365c1..ffd698e 100644
+--- a/src/kosmickrisp/bridge/mtl_device.h
++++ b/src/kosmickrisp/bridge/mtl_device.h
+@@ -66,6 +66,10 @@ struct mtl_size mtl_sparse_tile_count(mtl_device *device,
+ /* Resource creation */
+ mtl_buffer *mtl_new_buffer_with_bytes_no_copy(mtl_device *device, void *ptr,
+                                               uint64_t size_B);
++/* Standalone texture owned by the device rather than placed in a heap, for
++ * images bound to memory that has no heap (imported host pointers). */
++mtl_texture *mtl_new_texture_with_descriptor_private(
++   mtl_device *device, const struct kk_image_layout *layout);
+ mtl_command_allocator *mtl_new_command_allocator(mtl_device *device);
+ mtl_command_buffer *mtl_new_command_buffer(mtl_device *device);
+ 
+diff --git a/src/kosmickrisp/bridge/mtl_device.m b/src/kosmickrisp/bridge/mtl_device.m
+index 753cda3..69fc44e 100644
+--- a/src/kosmickrisp/bridge/mtl_device.m
++++ b/src/kosmickrisp/bridge/mtl_device.m
+@@ -263,6 +263,18 @@
+    }
+ }
+ 
++mtl_texture *
++mtl_new_texture_with_descriptor_private(mtl_device *device,
++                                        const struct kk_image_layout *layout)
++{
++   @autoreleasepool {
++      id<MTLDevice> dev = (id<MTLDevice>)device;
++      MTLTextureDescriptor *descriptor = [mtl_new_texture_descriptor(layout) autorelease];
++      descriptor.resourceOptions = KK_MTL_RESOURCE_OPTIONS;
++      return (mtl_texture *)[dev newTextureWithDescriptor:descriptor];
++   }
++}
++
+ uint64_t
+ mtl_minimum_linear_texture_alignment_for_pixel_format(
+    mtl_device *device, enum mtl_pixel_format format)
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_device.c b/src/kosmickrisp/bridge/stubs/mtl_device.c
+index 68faa46..2597593 100644
+--- a/src/kosmickrisp/bridge/stubs/mtl_device.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_device.c
+@@ -157,6 +157,13 @@ mtl_new_buffer_with_bytes_no_copy(mtl_device *device, void *ptr,
+    return NULL;
+ }
+ 
++mtl_texture *
++mtl_new_texture_with_descriptor_private(mtl_device *device,
++                                        const struct kk_image_layout *layout)
++{
++   return NULL;
++}
++
+ mtl_command_allocator *
+ mtl_new_command_allocator(mtl_device *device)
+ {
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index 9950b19..d59e1e4 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -442,6 +442,24 @@ kk_device_remove_heap_from_residency_set(struct kk_device *dev, mtl_heap *heap)
+    simple_mtx_unlock(&dev->residency_set.mutex);
+ }
+ 
++void
++kk_device_add_texture_to_residency_set(struct kk_device *dev,
++                                       mtl_texture *texture)
++{
++   simple_mtx_lock(&dev->residency_set.mutex);
++   mtl_residency_set_add_allocation(dev->residency_set.handle, texture);
++   simple_mtx_unlock(&dev->residency_set.mutex);
++}
++
++void
++kk_device_remove_texture_from_residency_set(struct kk_device *dev,
++                                            mtl_texture *texture)
++{
++   simple_mtx_lock(&dev->residency_set.mutex);
++   mtl_residency_set_remove_allocation(dev->residency_set.handle, texture);
++   simple_mtx_unlock(&dev->residency_set.mutex);
++}
++
+ void
+ kk_device_add_buffer_to_residency_set(struct kk_device *dev, mtl_buffer *buffer)
+ {
+diff --git a/src/kosmickrisp/vulkan/kk_device.h b/src/kosmickrisp/vulkan/kk_device.h
+index e3795ba..f53ba44 100644
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -117,6 +117,10 @@ VkResult kk_device_init_meta(struct kk_device *dev);
+ void kk_device_finish_meta(struct kk_device *dev);
+ VkResult kk_device_init_lib(struct kk_device *dev);
+ void kk_device_finish_lib(struct kk_device *dev);
++void kk_device_add_texture_to_residency_set(struct kk_device *dev,
++                                            mtl_texture *texture);
++void kk_device_remove_texture_from_residency_set(struct kk_device *dev,
++                                                 mtl_texture *texture);
+ void kk_device_add_heap_to_residency_set(struct kk_device *dev, mtl_heap *heap);
+ void kk_device_remove_heap_from_residency_set(struct kk_device *dev,
+                                               mtl_heap *heap);
+diff --git a/src/kosmickrisp/vulkan/kk_image.c b/src/kosmickrisp/vulkan/kk_image.c
+index de27a6d..f562f32 100644
+--- a/src/kosmickrisp/vulkan/kk_image.c
++++ b/src/kosmickrisp/vulkan/kk_image.c
+@@ -582,6 +582,13 @@ kk_image_plane_finish(struct kk_device *dev, struct kk_image_plane *plane,
+                       VkImageCreateFlags create_flags,
+                       const VkAllocationCallbacks *pAllocator)
+ {
++   if (plane->shadow) {
++      if (plane->mtl_handle != NULL)
++         kk_device_remove_texture_from_residency_set(dev, plane->mtl_handle);
++      if (plane->mtl_handle_array != NULL)
++         kk_device_remove_texture_from_residency_set(dev,
++                                                     plane->mtl_handle_array);
++   }
+    if (plane->mtl_handle != NULL)
+       mtl_release(plane->mtl_handle);
+    if (plane->mtl_handle_array != NULL)
+@@ -830,7 +837,8 @@ kk_GetDeviceImageSubresourceLayoutKHR(
+ }
+ 
+ mtl_texture *
+-kk_image_plane_create_texture(struct kk_image_plane *plane,
++kk_image_plane_create_texture(struct kk_device *dev,
++                              struct kk_image_plane *plane,
+                               struct kk_image_layout *layout, uint64_t offset_B)
+ {
+    uint64_t mem_offset_B = plane->mem_offset_B + offset_B;
+@@ -838,6 +846,18 @@ kk_image_plane_create_texture(struct kk_image_plane *plane,
+       return mtl_new_texture_with_descriptor_linear(plane->mem->bo->map, layout,
+                                                     mem_offset_B);
+ 
++   /* Memory imported from a host pointer has no heap to place the texture
++    * in. Back the plane with a standalone texture instead: the contents of
++    * optimal-tiled image memory are opaque, so nothing can observe that the
++    * texture does not live in the memory. */
++   if (plane->mem->bo->mtl_handle == NULL) {
++      mtl_texture *texture =
++         mtl_new_texture_with_descriptor_private(dev->mtl_handle, layout);
++      if (texture != NULL)
++         kk_device_add_texture_to_residency_set(dev, texture);
++      return texture;
++   }
++
+    return mtl_new_texture_with_descriptor(plane->mem->bo->mtl_handle, layout,
+                                           mem_offset_B);
+ }
+@@ -852,12 +872,14 @@ kk_image_plane_bind(struct kk_device *dev, struct kk_image *image,
+                                &plane_align_B);
+    *offset_B = align64(*offset_B, plane_align_B);
+ 
+-   assert(plane->layout.linear || mem->bo->mtl_handle);
+-
+    /* Linear textures in Metal need to be allocated through a buffer... */
+    plane->mem = mem;
+    plane->mem_offset_B = *offset_B;
+-   plane->mtl_handle = kk_image_plane_create_texture(plane, &plane->layout, 0u);
++   plane->shadow = !plane->layout.linear && mem->bo->mtl_handle == NULL;
++   plane->mtl_handle =
++      kk_image_plane_create_texture(dev, plane, &plane->layout, 0u);
++   if (plane->mtl_handle == NULL)
++      return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    if (image->vk.base.object_name)
+       mtl_resource_set_label(plane->mtl_handle, image->vk.base.object_name);
+ 
+@@ -873,9 +895,11 @@ kk_image_plane_bind(struct kk_device *dev, struct kk_image *image,
+       array_layout.type = MTL_TEXTURE_TYPE_2D_ARRAY;
+       array_layout.layers = array_layout.layers * array_layout.depth_px;
+       array_layout.depth_px = 1u;
+-      plane->mtl_handle_array = mtl_new_texture_with_descriptor(
+-         mem->bo->mtl_handle, &array_layout, *offset_B);
+-      if (image->vk.base.object_name)
++      /* A shadow plane cannot alias the 3D texture; the 2D array is a
++       * separate allocation (TODO_KOSMICKRISP: keep them in sync). */
++      plane->mtl_handle_array =
++         kk_image_plane_create_texture(dev, plane, &array_layout, 0u);
++      if (plane->mtl_handle_array != NULL && image->vk.base.object_name)
+          mtl_resource_set_label(plane->mtl_handle_array,
+                                 image->vk.base.object_name);
+    }
+diff --git a/src/kosmickrisp/vulkan/kk_image.h b/src/kosmickrisp/vulkan/kk_image.h
+index 40e75a2..f82ccdb 100644
+--- a/src/kosmickrisp/vulkan/kk_image.h
++++ b/src/kosmickrisp/vulkan/kk_image.h
+@@ -40,6 +40,12 @@ struct kk_image_plane {
+    /* Metal handle with 2D array type for 3D images */
+    mtl_texture *mtl_handle_array;
+    uint64_t addr;
++   /* The textures are standalone device allocations instead of placements in
++    * the memory's heap: the memory was imported from a host pointer, which
++    * only backs an MTLBuffer. Legal for optimal tiling since the memory
++    * contents are opaque, but the textures cannot alias the memory, each
++    * other, or subresource reinterpretations. */
++   bool shadow;
+ };
+ 
+ struct kk_image {
+@@ -134,7 +140,8 @@ kk_image_memory_aspects_to_plane(ASSERTED const struct kk_image *image,
+    }
+ }
+ 
+-mtl_texture *kk_image_plane_create_texture(struct kk_image_plane *plane,
++mtl_texture *kk_image_plane_create_texture(struct kk_device *dev,
++                                           struct kk_image_plane *plane,
+                                            struct kk_image_layout *layout,
+                                            uint64_t offset_B);
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_image_view.c b/src/kosmickrisp/vulkan/kk_image_view.c
+index 90eb6f6..2917d1c 100644
+--- a/src/kosmickrisp/vulkan/kk_image_view.c
++++ b/src/kosmickrisp/vulkan/kk_image_view.c
+@@ -152,7 +152,8 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
+       /* Block texel view requires subresource aliasing. We do it here to avoid
+        * having to create a texture for every possible subresource up-front */
+       if (util_format_is_compressed(plane->layout.format.pipe) &&
+-          !util_format_is_compressed(view_layout.format.pipe)) {
++          !util_format_is_compressed(view_layout.format.pipe) &&
++          !plane->shadow /* no memory to alias, TODO_KOSMICKRISP */) {
+          uint64_t subres_offset_B =
+             kk_get_layer_level_B(&plane->layout, view_layout.base_array_layer,
+                                  view_layout.base_level);
+@@ -167,7 +168,7 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
+          subres_layout.format.pipe = view_layout.format.pipe;
+          subres_layout.format.mtl = view_layout.format.mtl;
+ 
+-         mtl_handle = kk_image_plane_create_texture(plane, &subres_layout,
++         mtl_handle = kk_image_plane_create_texture(dev, plane, &subres_layout,
+                                                     subres_offset_B);
+          view->planes[view_plane].mtl_handle_subres = mtl_handle;
+ 

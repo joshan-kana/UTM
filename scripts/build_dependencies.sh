@@ -905,6 +905,11 @@ build_vulkan_drivers () {
         $CC -dynamiclib -x c /dev/null -o "$PREFIX/lib/libvulkan_kosmickrisp.dylib"
         ;;
     * )
+        MESA_DIR="$BUILD_DIR/mesa.git"
+        KOSMICKRISP_PATCH="$PATCHES_DIR/kosmickrisp-host-pointer-images.patch"
+        if ! git -C "$MESA_DIR" apply --reverse --check "$KOSMICKRISP_PATCH" >/dev/null 2>&1; then
+            git -C "$MESA_DIR" apply "$KOSMICKRISP_PATCH"
+        fi
         build_mesa_host
         meson_darwin_build $MESA_REPO -Dmesa-clc=system -Dprecomp-compiler=system -Dgallium-drivers= -Dvulkan-drivers=kosmickrisp -Dplatforms=macos
         patch_vulkan_icd "$PREFIX/share/vulkan/icd.d/kosmickrisp_mesa_icd.$ARCH.json"
