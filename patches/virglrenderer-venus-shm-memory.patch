@@ -1,0 +1,245 @@
+diff --git a/src/venus/vkr_context.c b/src/venus/vkr_context.c
+index 2ea5898..7258b3b 100644
+--- a/src/venus/vkr_context.c
++++ b/src/venus/vkr_context.c
+@@ -189,10 +189,13 @@ static inline void
+ vkr_context_free_resource(struct hash_entry *entry)
+ {
+    struct vkr_resource *res = entry->data;
+-   if (res->fd_type == VIRGL_RESOURCE_FD_SHM)
++   if (res->fd_type == VIRGL_RESOURCE_FD_SHM) {
+       munmap(res->u.data, res->size);
+-   else if (res->u.fd >= 0)
++      if (res->shm_fd >= 0)
++         close(res->shm_fd);
++   } else if (res->u.fd >= 0) {
+       close(res->u.fd);
++   }
+    free(res);
+ }
+
+@@ -230,23 +233,52 @@ vkr_context_import_resource_internal(struct vkr_context *ctx,
+ {
+    assert(!vkr_context_get_resource(ctx, res_id));
+
++   /* Resources exported from VkDeviceMemory may have an SHM descriptor but
++    * no mapping yet. Keep the resource's own view independent of imports. */
++   bool mapped_here = false;
++   if (fd_type == VIRGL_RESOURCE_FD_SHM && !mmap_ptr) {
++      if (fd < 0 || !blob_size || blob_size > SIZE_MAX)
++         return false;
++      mmap_ptr = mmap(NULL, blob_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++      if (mmap_ptr == MAP_FAILED)
++         return false;
++      mapped_here = true;
++   }
++
+    struct vkr_resource *res = malloc(sizeof(*res));
+-   if (!res)
++   if (!res) {
++      if (mapped_here)
++         munmap(mmap_ptr, blob_size);
+       return false;
++   }
+
+    res->res_id = res_id;
+    res->fd_type = fd_type;
+    res->size = blob_size;
+-
+-   /* fd and mmap_ptr cannot be valid at the same time, but allowed to be -1 and NULL */
+-   assert(fd < 0 || !mmap_ptr);
++   res->shm_fd = -1;
++
++   /* SHM keeps both a mapping and an independent descriptor for later import. */
++   assert(fd < 0 || !mmap_ptr || fd_type == VIRGL_RESOURCE_FD_SHM);
++   if (fd_type == VIRGL_RESOURCE_FD_SHM) {
++      res->shm_fd = os_dupfd_cloexec(fd);
++      if (res->shm_fd < 0) {
++         free(res);
++         if (mapped_here)
++            munmap(mmap_ptr, blob_size);
++         return false;
++      }
++   }
+    if (mmap_ptr)
+       res->u.data = mmap_ptr;
+    else
+       res->u.fd = fd;
+
+    if (!vkr_context_add_resource(ctx, res)) {
++      if (res->shm_fd >= 0)
++         close(res->shm_fd);
+       free(res);
++      if (mapped_here)
++         munmap(mmap_ptr, blob_size);
+       return false;
+    }
+
+@@ -266,7 +298,7 @@ vkr_context_import_resource_from_shm(struct vkr_context *ctx,
+       return false;
+
+    if (!vkr_context_import_resource_internal(ctx, res_id, blob_size,
+-                                             VIRGL_RESOURCE_FD_SHM, -1, mmap_ptr)) {
++                                             VIRGL_RESOURCE_FD_SHM, fd, mmap_ptr)) {
+       munmap(mmap_ptr, blob_size);
+       return false;
+    }
+@@ -299,7 +331,7 @@ vkr_context_create_resource_from_shm(struct vkr_context *ctx,
+    }
+
+    if (!vkr_context_import_resource_internal(ctx, res_id, alloc_size,
+-                                             VIRGL_RESOURCE_FD_SHM, -1, mmap_ptr)) {
++                                             VIRGL_RESOURCE_FD_SHM, fd, mmap_ptr)) {
+       munmap(mmap_ptr, alloc_size);
+       close(fd);
+       return false;
+@@ -332,12 +364,11 @@ vkr_context_create_resource_from_device_memory(struct vkr_context *ctx,
+    if (!vkr_device_memory_export_blob(mem, blob_size, blob_flags, &blob))
+       return false;
+
+-   /* If memory might get exported, store a dup'ed fd in vkr_resource for:
+-    * - vkAllocateMemory for dma_buf import
+-    * - vkGetMemoryFdPropertiesKHR for dma_buf fd properties query
+-    */
++   /* An SHM-backed Vulkan allocation needs its fd even when the app never
++    * explicitly requests export: QEMU uses it to map HOST_VISIBLE blobs.
++    * Other memory types need a dup only when explicit export is possible. */
+    int res_fd = -1;
+-   if (mem->might_export) {
++   if (mem->might_export || blob.type == VIRGL_RESOURCE_FD_SHM) {
+       res_fd = os_dupfd_cloexec(blob.u.fd);
+       if (res_fd < 0) {
+          close(blob.u.fd);
+@@ -353,6 +384,11 @@ vkr_context_create_resource_from_device_memory(struct vkr_context *ctx,
+       return false;
+    }
+
++   /* SHM resources own a separate duplicated descriptor, so release the
++    * temporary one here. Non-SHM descriptors are transferred to the resource. */
++   if (blob.type == VIRGL_RESOURCE_FD_SHM && res_fd >= 0)
++      close(res_fd);
++
+    *out_blob = blob;
+
+    return true;
+diff --git a/src/venus/vkr_context.h b/src/venus/vkr_context.h
+index 12541a7..9509399 100644
+--- a/src/venus/vkr_context.h
++++ b/src/venus/vkr_context.h
+@@ -32,6 +32,8 @@ struct vkr_resource {
+    } u;
+
+    size_t size;
++   /* Keep the imported SHM backing open independently of its mapped view. */
++   int shm_fd;
+ };
+
+ enum vkr_context_validate_level {
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+index 1c460fd..6e3af28 100644
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -295,6 +295,8 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+    struct vkr_physical_device *physical_dev = dev->physical_device;
+
+    VkMemoryAllocateInfo *alloc_info = (VkMemoryAllocateInfo *)args->pAllocateInfo;
++   struct vkr_shm *imported_shm = NULL;
++   VkImportMemoryHostPointerInfoEXT imported_host_info;
+    const uint32_t mem_type_index = alloc_info->memoryTypeIndex;
+    if (unlikely(mem_type_index >= physical_dev->memory_properties.memoryTypeCount)) {
+       args->ret = VK_ERROR_UNKNOWN;
+@@ -308,12 +310,60 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+       alloc_info, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
+    if (prev_of_res_info) {
+       res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
+-      if (!vkr_get_fd_info_from_resource_info(ctx, res_info, &local_import_info)) {
+-         args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+-         return;
++      struct vkr_resource *resource =
++         vkr_context_get_resource(ctx, res_info->resourceId);
++      if (physical_dev->is_dma_buf_emulated && resource &&
++          resource->fd_type == VIRGL_RESOURCE_FD_SHM) {
++         if (resource->shm_fd < 0 || resource->size < alloc_info->allocationSize) {
++            args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
++            return;
++         }
++         imported_shm = calloc(1, sizeof(*imported_shm));
++         if (!imported_shm) {
++            args->ret = VK_ERROR_OUT_OF_HOST_MEMORY;
++            return;
++         }
++         imported_shm->fd = os_dupfd_cloexec(resource->shm_fd);
++         imported_shm->size = resource->size;
++         imported_shm->ptr = MAP_FAILED;
++         if (imported_shm->fd >= 0)
++            imported_shm->ptr = mmap(NULL, imported_shm->size, PROT_READ | PROT_WRITE,
++                                     MAP_SHARED, imported_shm->fd, 0);
++         if (imported_shm->ptr == MAP_FAILED) {
++            if (imported_shm->fd >= 0)
++               close(imported_shm->fd);
++            free(imported_shm);
++            args->ret = VK_ERROR_OUT_OF_HOST_MEMORY;
++            return;
++         }
++         VkMemoryHostPointerPropertiesEXT host_props = {
++            .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT,
++         };
++         args->ret = dev->GetMemoryHostPointerPropertiesEXT(
++            dev->base.handle.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++            imported_shm->ptr, &host_props);
++         if (args->ret == VK_SUCCESS &&
++             !(host_props.memoryTypeBits & (1u << mem_type_index)))
++            args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
++         if (args->ret != VK_SUCCESS) {
++            vkr_shm_free(imported_shm);
++            return;
++         }
++         imported_host_info = (VkImportMemoryHostPointerInfoEXT){
++            .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
++            .pNext = res_info->pNext,
++            .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++            .pHostPointer = imported_shm->ptr,
++         };
++         prev_of_res_info->pNext = (const struct VkBaseInStructure *)&imported_host_info;
++         alloc_info->allocationSize = imported_shm->size;
++      } else {
++         if (!vkr_get_fd_info_from_resource_info(ctx, res_info, &local_import_info)) {
++            args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
++            return;
++         }
++         prev_of_res_info->pNext = (const struct VkBaseInStructure *)&local_import_info;
+       }
+-
+-      prev_of_res_info->pNext = (const struct VkBaseInStructure *)&local_import_info;
+    }
+
+    VkExportMemoryAllocateInfo *export_info =
+@@ -335,10 +385,10 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+     */
+    const uint32_t property_flags =
+       physical_dev->memory_properties.memoryTypes[mem_type_index].propertyFlags;
+-   uint32_t valid_fd_types = 0;
++   uint32_t valid_fd_types = imported_shm ? (1u << VIRGL_RESOURCE_FD_SHM) : 0;
+    int udmabuf_fd = -1;
+    void *gbm_bo = NULL;
+-   struct vkr_shm *shm = NULL;
++   struct vkr_shm *shm = imported_shm;
+    VkExportMemoryAllocateInfo local_export_info;
+    VkImportMemoryHostPointerInfoEXT local_host_import;
+
+@@ -354,6 +404,15 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+                                  ((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ||
+                                   might_export);
+
++   if (imported_shm && export_info) {
++      /* The imported backing is already shared; do not ask the Vulkan host
++       * to export DMA-BUF, which the emulation explicitly does not support. */
++      VkBaseInStructure *prev_of_export_info = vkr_find_prev_struct(
++         alloc_info, VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO);
++      prev_of_export_info->pNext = export_info->pNext;
++      export_info = NULL;
++   }
++
+    if (force_shm_import) {
+       if (export_info) {
+          /* Strip export info since valid_fd_types can only be shm here.  The
