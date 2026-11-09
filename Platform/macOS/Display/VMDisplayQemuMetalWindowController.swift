@@ -105,13 +105,15 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
         metalView.delegate = renderer
         metalView.inputDelegate = self
 
-        screenChangedToken = NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification, object: nil, queue: .main) { [weak self] _ in
-            // update minSize when we change screens
-            if let self = self,
-               let window = window,
-               displaySize != .zero,
-               !isDisplaySizeDynamic {
-                window.contentMinSize = contentMinSize(in: window, for: displaySize)
+        screenChangedToken = NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification, object: window, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            if let fps = self.preferredFramesPerSecond {
+                self.metalView.preferredFramesPerSecond = fps
+            }
+            if let window = self.window,
+               self.displaySize != .zero,
+               !self.isDisplaySizeDynamic {
+                window.contentMinSize = self.contentMinSize(in: window, for: self.displaySize)
             }
         }
 
