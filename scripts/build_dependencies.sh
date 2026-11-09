@@ -801,10 +801,11 @@ build_qemu_dependencies () {
         VIRGL_RENDER_SERVER_MODE="thread"
     fi
     VIRGL_DIR="$BUILD_DIR/$(basename "$VIRGLRENDERER_REPO")"
-    VIRGL_PATCH="$PATCHES_DIR/virglrenderer-pipeline-validation.patch"
-    if ! git -C "$VIRGL_DIR" apply --reverse --check "$VIRGL_PATCH" >/dev/null 2>&1; then
-        git -C "$VIRGL_DIR" apply "$VIRGL_PATCH"
-    fi
+    for VIRGL_PATCH in "$PATCHES_DIR/virglrenderer-pipeline-validation.patch" "$PATCHES_DIR/virglrenderer-venus-shm-memory.patch"; do
+        if ! git -C "$VIRGL_DIR" apply --reverse --check "$VIRGL_PATCH" >/dev/null 2>&1; then
+            git -C "$VIRGL_DIR" apply "$VIRGL_PATCH"
+        fi
+    done
     if [ "$PLATFORM" == "macos" ]; then
         VIRGL_METAL_PATCH="$PATCHES_DIR/virglrenderer-metal-pbo-upload.patch"
         if ! git -C "$VIRGL_DIR" apply --reverse --check "$VIRGL_METAL_PATCH" >/dev/null 2>&1; then
