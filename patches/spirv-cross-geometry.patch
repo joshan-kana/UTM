@@ -1,11 +1,11 @@
 diff --git a/spirv_msl.cpp b/spirv_msl.cpp
-index 2b291113..750d56dd 100644
+index 2b291113..895eb4c3 100644
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
 @@ -1932,6 +1932,29 @@ void CompilerMSL::emit_mesh_wrapper()
  {
  	auto &execution = get_entry_point();
- 
+
 +	auto emit_resources = [this](bool &need_comma) {
 +		auto resources = get_sorted_entry_point_args(false);
 +		for (auto &resource : resources)
@@ -39,9 +39,9 @@ index 2b291113..750d56dd 100644
 +		statement("uint32_t firstVertex;");
  		statement("uint8_t topoStrip;");
 +		statement("uint8_t topoFan;");
- 
+
  		end_scope(";");
- 
+
 @@ -1996,13 +2021,13 @@ void CompilerMSL::emit_mesh_wrapper()
  		else if (msl_options.input_primitive_type == Options::PrimitiveTopology::Triangles)
  		{
@@ -63,10 +63,10 @@ index 2b291113..750d56dd 100644
  		begin_scope();
  		statement("uint vertexIndex;");
 +		statement("uint indexPosition = drawInfo->topoFan ? (i == 0 ? 0 : positionInGrid.x + i) : startingIndex + i;");
- 
+
  		statement("if (drawInfo->indexed)");
  		begin_scope();
- 
+
  		statement(R"END(
  		if (drawInfo->indexSize == 1) {
 -			vertexIndex = ((constant uchar *)drawInfo->indexBuffer)[startingIndex + i];
@@ -87,17 +87,17 @@ index 2b291113..750d56dd 100644
  				return;
  			}
  		})END");
- 
+
  		end_scope();
 -		statement("else vertexIndex = startingIndex + i;");
 +		statement("else vertexIndex = indexPosition + (drawInfo->topoFan ? drawInfo->firstVertex : 0);");
- 
+
  		if (stage_in_var_id)
  		{
 @@ -2157,13 +2183,7 @@ void CompilerMSL::emit_mesh_wrapper()
  			}
  		}
- 
+
 -		auto resources = get_sorted_entry_point_args(false);
 -
 -		for (auto &resource : resources)
@@ -112,7 +112,7 @@ index 2b291113..750d56dd 100644
 @@ -2280,6 +2300,11 @@ void CompilerMSL::emit_mesh_wrapper()
  			if (is_hidden_variable(var, true))
  				return;
- 
+
 +			// The primitive ID belongs to the mesh grid, not the vertex payload.
 +			if (is_builtin_variable(var) &&
 +			    get_decoration(id, DecorationBuiltIn) == BuiltInPrimitiveId)
@@ -121,36 +121,66 @@ index 2b291113..750d56dd 100644
  			statement("if (i < sizeof(", name, ") / sizeof(", name, "[0]))");
  			statement("\t", name, "[i] = out.", name, ";");
  		});
-@@ -2300,10 +2325,19 @@ void CompilerMSL::emit_mesh_wrapper()
+@@ -2300,10 +2325,24 @@ void CompilerMSL::emit_mesh_wrapper()
  			}
  		}
- 
+
 -		auto resources = get_sorted_entry_point_args(false);
 +		bool need_comma = true;
 +		emit_resources(need_comma);
- 
+
 -		for (auto &resource : resources)
 -			statement(", ", resource.name);
 +		// Each mesh threadgroup processes one input primitive. Forward its index
 +		// to geometry shaders that read the PrimitiveId builtin.
++		bool sent_primitive_id = false;
 +		ir.for_each_typed_id<SPIRVariable>([&](uint32_t id, SPIRVariable &var)
 +		{
 +			if (var.storage == StorageClassInput && is_builtin_variable(var) &&
 +			    interface_variable_exists_in_entry_point(id) &&
 +			    !is_hidden_variable(var, true) &&
-+			    get_decoration(id, DecorationBuiltIn) == BuiltInPrimitiveId)
++			    get_decoration(id, DecorationBuiltIn) == BuiltInPrimitiveId &&
++			    !sent_primitive_id)
++			{
 +				statement(", tid");
++				sent_primitive_id = true;
++			}
 +		});
- 
+
  		statement(");");
  		end_scope();
-@@ -16958,7 +16992,8 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
+@@ -16165,6 +16204,7 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
+ {
+ 	// Builtin variables
+ 	SmallVector<pair<SPIRVariable *, BuiltIn>, 8> active_builtins;
++	bool emitted_mesh_primitive_id = false;
+ 	ir.for_each_typed_id<SPIRVariable>([&](uint32_t var_id, SPIRVariable &var) {
+ 		if (var.storage != StorageClassInput)
+ 			return;
+@@ -16185,6 +16225,16 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
+ 			// Remember this variable. We may need to correct its type.
+ 			active_builtins.push_back(make_pair(&var, bi_type));
+
++			// Some geometry shaders declare the same PrimitiveId input twice.
++			// Both refer to the same mesh-grid primitive, so emit one argument.
++			if (get_execution_model() == ExecutionModelGeometry && msl_options.for_mesh_pipeline &&
++			    bi_type == BuiltInPrimitiveId)
++			{
++				if (emitted_mesh_primitive_id)
++					return;
++				emitted_mesh_primitive_id = true;
++			}
++
+ 			if (is_direct_input_builtin(bi_type))
+ 			{
+ 				if (!ep_args.empty())
+@@ -16958,7 +17008,8 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
  				entry_func.fixup_hooks_in.push_back(
  				    [this, &type, &var, var_id]()
  				    {
 -					    bool is_array_type = !type.array.empty() && !is_var_runtime_size_array(var);
 +					    bool is_array_type = !type.array.empty() && !is_var_runtime_size_array(var) &&
 +					                         (!msl_options.for_mesh_pipeline || get_resource_array_size(type, var_id) > 1);
- 
+
  					    uint32_t desc_set = get_decoration(var_id, DecorationDescriptorSet);
  					    if (var.storage != StorageClassPushConstant && descriptor_set_is_argument_buffer(desc_set))
