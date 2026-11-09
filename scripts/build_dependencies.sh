@@ -885,7 +885,10 @@ build_moltenvk() {
     if ! git apply --reverse --check "$PATCHES_DIR/moltenvk-depth-clip-enable.patch" >/dev/null 2>&1; then
         git apply "$PATCHES_DIR/moltenvk-depth-clip-enable.patch"
     fi
-    env -i PATH=$PATH HOME=$HOME LANG=en_US.UTF-8 make $MVK_PLATFORM$DEBUG_FLAGS
+    if ! git apply --reverse --check "$PATCHES_DIR/moltenvk-patched-shader-cache-identity.patch" >/dev/null 2>&1; then
+        git apply "$PATCHES_DIR/moltenvk-patched-shader-cache-identity.patch"
+    fi
+    env -i PATH=$PATH HOME=$HOME LANG=en_US.UTF-8 SPIRV_CROSS_PATCHED="$SPIRV_CROSS_PATCHED" make $MVK_PLATFORM$DEBUG_FLAGS
     if [ "$PLATFORM" == "macos" ]; then
         $(xcrun --sdk $SDK --find lipo) "Package/$BUILD_CONFIGURATION/MoltenVK/dylib/macOS/libMoltenVK.dylib" -extract $ARCH -output "$PREFIX/lib/libMoltenVK.dylib"
     else
