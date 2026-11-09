@@ -54,6 +54,7 @@ struct VMCardView: View {
                         .font(.largeTitle)
                         .labelStyle(.iconOnly)
                 }
+                .accessibilityIdentifier(UTMAccessibilityID.Library.run(named: vm.detailsTitleLabel))
                 #endif
             } else if vm.isBusy {
                 Spinner(size: .large)
@@ -64,11 +65,13 @@ struct VMCardView: View {
         .onDoubleClick {
             data.run(vm: vm)
         }
+        .accessibilityElement(children: .contain)
         #else
         .simultaneousGesture(TapGesture(count: 2).onEnded {
             data.run(vm: vm)
         })
         #endif
+        .accessibilityIdentifier(UTMAccessibilityID.Library.card(named: vm.detailsTitleLabel))
     }
 }
 

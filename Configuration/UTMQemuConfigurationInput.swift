@@ -59,7 +59,7 @@ extension UTMQemuConfigurationInput {
         let rawTarget = target.rawValue
         if !architecture.hasUsbSupport || !target.hasUsbSupport {
             usbBusSupport = .disabled
-        } else if rawTarget.hasPrefix("pc") || rawTarget.hasPrefix("q35") {
+        } else if target.isPcOrQ35Machine {
             usbBusSupport = .usb3_0
         } else if (architecture == .arm || architecture == .aarch64) && (rawTarget.hasPrefix("virt-") || rawTarget == "virt") {
             usbBusSupport = .usb3_0
@@ -83,5 +83,17 @@ extension UTMQemuConfigurationInput {
             hasUsbSharing = true
             maximumUsbShare = sharingNum.intValue
         }
+    }
+}
+
+// MARK: - Editing rules
+
+extension UTMQemuConfigurationInput {
+    /// How many USB devices can be shared with the guest at once.
+    static let maximumUsbShareRange = 0...64
+    
+    /// Keeps the shared USB device limit within range when editing ends.
+    mutating func clampMaximumUsbShare() {
+        maximumUsbShare = min(max(maximumUsbShare, Self.maximumUsbShareRange.lowerBound), Self.maximumUsbShareRange.upperBound)
     }
 }

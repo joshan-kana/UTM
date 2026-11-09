@@ -299,12 +299,12 @@ import Virtualization // for getting network interfaces
                     if display.hardware.rawValue.lowercased().contains("vga") && isClassicMacNewWorld {
                         "edid=on"
                     }
-                    if isDisplayGLSupported(display) && isVulkanSupported {
+                    if display.isGLSupported && isVulkanSupported {
                         "hostmem=8G"
                         "blob=true"
                         "venus=true"
                     }
-                    if isDisplayGLSupported(display) && isNeptuneSupported {
+                    if display.isGLSupported && isNeptuneSupported {
                         if !isVulkanSupported {
                             "hostmem=8G"
                             "blob=true"
@@ -320,13 +320,9 @@ import Virtualization // for getting network interfaces
         }
     }
 
-    private func isDisplayGLSupported(_ display: UTMQemuConfigurationDisplay) -> Bool {
-        display.hardware.rawValue.contains("-gl-") || display.hardware.rawValue.hasSuffix("-gl")
-    }
-
     private var isGLSupported: Bool {
         displays.contains { display in
-            isDisplayGLSupported(display)
+            display.isGLSupported
         }
     }
 
@@ -535,7 +531,7 @@ import Virtualization // for getting network interfaces
     }
     
     private var isSecureBootUsed: Bool {
-        system.architecture.hasSecureBootSupport && system.target.hasSecureBootSupport && qemu.hasTPMDevice
+        system.hasSecureBootSupport && qemu.hasTPMDevice
     }
     
     @QEMUArgumentBuilder private var machineArguments: [QEMUArgument] {
@@ -558,7 +554,7 @@ import Virtualization // for getting network interfaces
             if system.isForceMulticore {
                 "thread=multi"
             }
-            let tbSize = system.jitCacheSize > 0 ? system.jitCacheSize : system.memorySize / 4
+            let tbSize = system.effectiveJitCacheSizeMib
             "tb-size=\(tbSize)"
             #if WITH_JIT
             // use mirror mapping when we don't have JIT entitlements
@@ -685,8 +681,18 @@ import Virtualization // for getting network interfaces
     }
     
     private var resourceURL: URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!.appendingPathComponent("qemu", isDirectory: true)
+        #if DEBUG
+        if let override = Self.resourceURLOverride {
+            return override
+        }
+        #endif
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!.appendingPathComponent("qemu", isDirectory: true)
     }
+
+    #if DEBUG
+    /// Replaces the QEMU resource cache so tests can control which firmware images exist.
+    nonisolated(unsafe) static var resourceURLOverride: URL?
+    #endif
     
     private var soundBackend: UTMQEMUSoundBackend {
         let value = UserDefaults.standard.integer(forKey: "QEMUSoundBackend")

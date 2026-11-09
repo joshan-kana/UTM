@@ -67,6 +67,10 @@ struct UTMQemuConfigurationSerial: Codable, Identifiable {
         mode = try values.decode(QEMUSerialMode.self, forKey: .mode)
         target = try values.decode(QEMUSerialTarget.self, forKey: .target)
         terminal = try values.decodeIfPresent(UTMConfigurationTerminal.self, forKey: .terminal)
+        // the built-in terminal always has settings, as `setMode(_:)` ensures when editing
+        if mode == .builtin && terminal == nil {
+            terminal = .init()
+        }
         hardware = try values.decodeIfPresent(AnyQEMUConstant.self, forKey: .hardware)
         tcpHostAddress = try values.decodeIfPresent(String.self, forKey: .tcpHostAddress)
         tcpPort = try values.decodeIfPresent(Int.self, forKey: .tcpPort)
@@ -113,5 +117,29 @@ extension UTMQemuConfigurationSerial {
             return nil
         }
         terminal = UTMConfigurationTerminal(migrating: oldConfig)
+    }
+}
+
+// MARK: - Editing rules
+
+extension UTMQemuConfigurationSerial {
+    /// Changes the connection mode; the built-in terminal gets default settings if it has none.
+    mutating func setMode(_ mode: QEMUSerialMode) {
+        self.mode = mode
+        if mode == .builtin && terminal == nil {
+            terminal = .init()
+        }
+    }
+    
+    /// Changes the target; a manual device needs the architecture to offer serial devices.
+    ///
+    /// Returns false when the target is unavailable, in which case the target is automatic.
+    mutating func setTarget(_ target: QEMUSerialTarget, for architecture: QEMUArchitecture) -> Bool {
+        if target == .manualDevice && architecture.serialDeviceType.allRawValues.isEmpty {
+            self.target = .autoDevice
+            return false
+        }
+        self.target = target
+        return true
     }
 }

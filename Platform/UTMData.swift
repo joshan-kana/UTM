@@ -57,8 +57,18 @@ enum AlertItem: Identifiable {
     
     /// Sandbox location for storing .utm bundles
     nonisolated static var defaultStorageUrl: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        #if DEBUG
+        if let override = storageUrlOverride {
+            return override
+        }
+        #endif
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
+
+    #if DEBUG
+    /// Replaces the storage location so tests keep their bundles in a directory they own.
+    nonisolated(unsafe) static var storageUrlOverride: URL?
+    #endif
     
     /// View: show VM settings
     @Published var showSettingsModal: Bool
@@ -1272,7 +1282,7 @@ struct UTMCapabilities: OptionSet, Codable {
     /// If set, host is x86_64
     static let isX86_64 = Self(rawValue: 1 << 3)
 
-    static fileprivate(set) var current: Self = {
+    static internal(set) var current: Self = {
         var current = Self()
         #if WITH_JIT
         if jb_has_jit_entitlement() {
