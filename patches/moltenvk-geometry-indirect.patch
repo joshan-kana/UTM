@@ -1,0 +1,329 @@
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+@@ -166,6 +166,10 @@
+ 	uint64_t indexBuffer;
+ 	uint32_t vertexStrides[kMVKMaxBufferCount];
+ 	uint32_t firstVertex;
++	uint32_t firstIndex;
++	int32_t baseVertex;
++	uint32_t firstInstance;
++	uint32_t drawIndex;
+ 	uint32_t geometryInvocations;
+ 	uint8_t topoStrip;
+ 	uint8_t topoFan;
+@@ -192,6 +196,89 @@
+ 				: pipeline->getVkVertexBindingStride((uint32_t)vkIdx);
+ 	}
+ }
++
++#if MVK_XCODE_14
++static_assert(sizeof(DrawInfo) == 168, "Geometry draw info layout must match the MSL conversion shader");
++
++// Vulkan draw parameters can be written by the GPU. Keep their translation on-GPU
++// and bind independently encoded DrawInfo for each indirect draw.
++static void encodeGeometryIndirect(MVKCommandEncoder* cmdEncoder,
++                                   id<MTLBuffer> srcBuffer,
++                                   VkDeviceSize srcOffset,
++                                   uint32_t drawCount,
++                                   uint32_t srcStride,
++                                   const MVKIndexMTLBufferBinding* indexBinding) {
++    if (!drawCount) { return; }
++
++    auto* pipeline = cmdEncoder->getGraphicsPipeline();
++    uint32_t topology = pipeline->getVkPrimitiveTopology();
++    if (topology > VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) {
++        cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT,
++                                           "Unsupported geometry indirect primitive topology: %u", topology);
++        return;
++    }
++
++    DrawInfo info = {};
++    info.geometryInvocations = pipeline->getGeometryInvocationCount();
++    info.topoStrip = topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
++                     topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
++    info.topoFan = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
++    if (indexBinding) {
++        info.indexed = true;
++        info.indexSize = (int)mvkMTLIndexTypeSizeInBytes((MTLIndexType)indexBinding->mtlIndexType);
++        info.indexBuffer = indexBinding->mtlBuffer.gpuAddress + indexBinding->offset;
++    }
++    setGeometryVertexStrides(info, cmdEncoder, pipeline);
++
++    constexpr size_t infoStride = 256;
++    constexpr size_t dispatchStride = sizeof(MTLDispatchThreadgroupsIndirectArguments);
++    auto* dispatchBuffer = cmdEncoder->getTempMTLBuffer(dispatchStride * drawCount, true);
++    auto* infoBuffer = cmdEncoder->getTempMTLBuffer(infoStride * drawCount, true);
++
++    cmdEncoder->encodeStoreActions(true);
++    id<MTLComputeCommandEncoder> compute = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseDrawIndirectConvertBuffers);
++    auto& computeState = cmdEncoder->getMtlCompute();
++    id<MTLComputePipelineState> convert = cmdEncoder->getCommandEncodingPool()->
++        getCmdDrawGeometryIndirectConvertBuffersMTLComputePipelineState(indexBinding != nullptr);
++    if (!convert) { return; }
++    computeState.bindPipeline(compute, convert);
++    computeState.bindBuffer(compute, srcBuffer, srcOffset, 0);
++    computeState.bindBuffer(compute, dispatchBuffer->_mtlBuffer, dispatchBuffer->_offset, 1);
++    computeState.bindBuffer(compute, infoBuffer->_mtlBuffer, infoBuffer->_offset, 2);
++    computeState.bindStructBytes(compute, &info, 3);
++    computeState.bindStructBytes(compute, &srcStride, 4);
++    computeState.bindStructBytes(compute, &drawCount, 5);
++    computeState.bindStructBytes(compute, &topology, 6);
++    NSUInteger threads = convert.threadExecutionWidth;
++    if (cmdEncoder->getMetalFeatures().nonUniformThreadgroups) {
++        [compute dispatchThreads: MTLSizeMake(drawCount, 1, 1)
++             threadsPerThreadgroup: MTLSizeMake(threads, 1, 1)];
++    } else {
++        [compute dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(drawCount, threads), 1, 1)
++                threadsPerThreadgroup: MTLSizeMake(threads, 1, 1)];
++    }
++
++    cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
++    cmdEncoder->_isIndexedDraw = indexBinding != nullptr;
++    cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
++    if (!pipeline->hasValidMTLPipelineStates()) { return; }
++
++    if (indexBinding) {
++        [cmdEncoder->_mtlRenderEncoder useResource: indexBinding->mtlBuffer
++                                           usage: MTLResourceUsageRead
++                                          stages: MTLRenderStageObject];
++    }
++    for (uint32_t i = 0; i < drawCount; ++i) {
++        [cmdEncoder->_mtlRenderEncoder setObjectBuffer: infoBuffer->_mtlBuffer
++                                               offset: infoBuffer->_offset + i * infoStride
++                                              atIndex: pipeline->getDrawInfoBufferIndex()];
++        [cmdEncoder->_mtlRenderEncoder drawMeshThreadgroupsWithIndirectBuffer: dispatchBuffer->_mtlBuffer
++                                                         indirectBufferOffset: dispatchBuffer->_offset + i * dispatchStride
++                                                  threadsPerObjectThreadgroup: MTLSizeMake(1, 1, 1)
++                                                    threadsPerMeshThreadgroup: MTLSizeMake(1, 1, 1)];
++    }
++}
++#endif
+ 
+ #pragma mark -
+ #pragma mark MVKCmdDraw
+@@ -397,6 +484,8 @@
+                 } else if (pipeline->isGeometryPipeline()) {
+ 					DrawInfo drawInfo = {};
+ 					drawInfo.geometryInvocations = pipeline->getGeometryInvocationCount();
++					drawInfo.firstInstance = _firstInstance;
++					drawInfo.firstVertex = _firstVertex;
+ 
+ 					auto primitiveType = cmdEncoder->getMtlGraphics().getPrimitiveType();
+ 					int threadCount = 0;
+@@ -405,7 +494,6 @@
+ 						// Generate the fan indices in the object shader to avoid staging
+ 						// a temporary index buffer on every draw.
+ 						drawInfo.topoFan = true;
+-						drawInfo.firstVertex = _firstVertex;
+ 						threadCount = _vertexCount - 2;
+ 					} else if (primitiveType == MTLPrimitiveTypePoint) {
+ 						threadCount = _vertexCount;
+@@ -423,8 +511,6 @@
+ 						reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "Unsupported primitive type: %lu", primitiveType);
+ 					}
+ 
+-					if (_firstVertex && !drawInfo.topoFan) reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "First vertex not supported yet.");
+-					if (_firstInstance) reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "First instance not supported yet.");
+ 
+ 					setGeometryVertexStrides(drawInfo, cmdEncoder, pipeline);
+ 					[cmdEncoder->_mtlRenderEncoder setObjectBytes: &drawInfo
+@@ -692,7 +778,9 @@
+                 } else if (pipeline->isGeometryPipeline()) {
+ 					DrawInfo drawInfo = {};
+ 					drawInfo.geometryInvocations = pipeline->getGeometryInvocationCount();
++					drawInfo.firstInstance = _firstInstance;
+ 					drawInfo.indexed = true;
++					drawInfo.baseVertex = _vertexOffset;
+ 					drawInfo.indexSize = (int)idxSize;
+ 					drawInfo.indexBuffer = ibb.mtlBuffer.gpuAddress + idxBuffOffset;
+ 
+@@ -720,8 +808,6 @@
+ 						reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "Unsupported primitive type %lu.", primitiveType);
+ 					}
+ 
+-					if (_vertexOffset) reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "Vertex offset not supported yet.");
+-					if (_firstInstance) reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "First instance not supported yet.");
+ 
+ 					setGeometryVertexStrides(drawInfo, cmdEncoder, pipeline);
+ 					[cmdEncoder->_mtlRenderEncoder setObjectBytes: &drawInfo
+@@ -850,7 +936,8 @@
+ 
+ #if MVK_XCODE_14
+     if (pipeline->isGeometryPipeline()) {
+-        reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "CmdDrawIndirect with geometry shader is not yet supported.");
++        encodeGeometryIndirect(cmdEncoder, _mtlIndirectBuffer, _mtlIndirectBufferOffset,
++                               _drawCount, _mtlIndirectBufferStride, nullptr);
+         return;
+     }
+ #endif
+@@ -1150,7 +1237,8 @@
+ 
+ #if MVK_XCODE_14
+     if (pipeline->isGeometryPipeline()) {
+-        reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "CmdDrawIndexedIndirect with geometry shader is not yet supported.");
++        encodeGeometryIndirect(cmdEncoder, _mtlIndirectBuffer, _mtlIndirectBufferOffset,
++                               _drawCount, _mtlIndirectBufferStride, &ibb);
+         return;
+     }
+ #endif
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h b/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h
+@@ -281,6 +281,79 @@
+ 		uint32_t idxBuffIdx = dst.indexStart + idxIdx;
+ 		idxBuff[idxBuffIdx] = idxBuffIdx;
+ 	}
++}
++
++// The mesh shader's draw-info layout must match both SPIRV-Cross and MVKCmdDraw.mm.
++struct GeometryDrawInfo {
++    int32_t indexed;
++    int32_t indexSize;
++    uint64_t indexBuffer;
++    uint32_t vertexStrides[31];
++    uint32_t firstVertex;
++    uint32_t firstIndex;
++    int32_t baseVertex;
++    uint32_t firstInstance;
++    uint32_t drawIndex;
++    uint32_t geometryInvocations;
++    uint8_t topoStrip;
++    uint8_t topoFan;
++};
++
++struct GeometryDispatchArgs {
++    uint32_t threadgroupsX;
++    uint32_t threadgroupsY;
++    uint32_t threadgroupsZ;
++};
++
++static inline uint32_t geometryPrimitiveCount(uint32_t vertices, uint32_t topology) {
++    switch (topology) {
++        case 0: return vertices;                              // Point list
++        case 1: return vertices / 2;                          // Line list
++        case 2: return vertices >= 2 ? vertices - 1 : 0;     // Line strip
++        case 3: return vertices / 3;                          // Triangle list
++        case 4:                                                // Triangle strip
++        case 5: return vertices >= 3 ? vertices - 2 : 0;     // Triangle fan
++        default: return 0;
++    }
++}
++
++kernel void cmdDrawGeometryIndirectConvertBuffers(
++    const device char* srcBuff [[buffer(0)]],
++    device GeometryDispatchArgs* dispatchBuff [[buffer(1)]],
++    device char* infoBuff [[buffer(2)]],
++    constant GeometryDrawInfo& templateInfo [[buffer(3)]],
++    constant uint32_t& srcStride [[buffer(4)]],
++    constant uint32_t& drawCount [[buffer(5)]],
++    constant uint32_t& topology [[buffer(6)]],
++    uint idx [[thread_position_in_grid]]) {
++    if (idx >= drawCount) return;
++    const device auto& src = *reinterpret_cast<const device MTLDrawPrimitivesIndirectArguments*>(srcBuff + idx * srcStride);
++    dispatchBuff[idx] = {geometryPrimitiveCount(src.vertexCount, topology), src.instanceCount, 1};
++    device auto& dst = *reinterpret_cast<device GeometryDrawInfo*>(infoBuff + idx * 256);
++    dst = templateInfo;
++    dst.firstVertex = src.vertexStart;
++    dst.firstInstance = src.baseInstance;
++    dst.drawIndex = idx;
++}
++
++kernel void cmdDrawIndexedGeometryIndirectConvertBuffers(
++    const device char* srcBuff [[buffer(0)]],
++    device GeometryDispatchArgs* dispatchBuff [[buffer(1)]],
++    device char* infoBuff [[buffer(2)]],
++    constant GeometryDrawInfo& templateInfo [[buffer(3)]],
++    constant uint32_t& srcStride [[buffer(4)]],
++    constant uint32_t& drawCount [[buffer(5)]],
++    constant uint32_t& topology [[buffer(6)]],
++    uint idx [[thread_position_in_grid]]) {
++    if (idx >= drawCount) return;
++    const device auto& src = *reinterpret_cast<const device MTLDrawIndexedPrimitivesIndirectArguments*>(srcBuff + idx * srcStride);
++    dispatchBuff[idx] = {geometryPrimitiveCount(src.indexCount, topology), src.instanceCount, 1};
++    device auto& dst = *reinterpret_cast<device GeometryDrawInfo*>(infoBuff + idx * 256);
++    dst = templateInfo;
++    dst.firstIndex = src.indexStart;
++    dst.baseVertex = src.baseVertex;
++    dst.firstInstance = src.baseInstance;
++    dst.drawIndex = idx;
+ }
+ 
+ kernel void cmdDrawIndirectConvertBuffers(const device char* srcBuff [[buffer(0)]],
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandResourceFactory.h b/MoltenVK/MoltenVK/Commands/MVKCommandResourceFactory.h
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandResourceFactory.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandResourceFactory.h
+@@ -352,6 +352,9 @@
+ 	/** Returns a new MTLComputePipelineState for populating an indirect index buffer from a non-indexed indirect buffer. */
+ 	id<MTLComputePipelineState> newCmdDrawIndirectPopulateIndexesMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
+ 
++	/** Converts Vulkan indirect geometry draws to Metal mesh dispatch arguments and per-draw metadata. */
++	id<MTLComputePipelineState> newCmdDrawGeometryIndirectConvertBuffersMTLComputePipelineState(bool indexed, MVKVulkanAPIDeviceObject* owner);
++
+ 	/** Returns a new MTLComputePipelineState for converting the contents of an indirect buffer. */
+ 	id<MTLComputePipelineState> newCmdDrawIndirectConvertBuffersMTLComputePipelineState(bool indexed,
+ 																						MVKVulkanAPIDeviceObject* owner);
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandResourceFactory.mm b/MoltenVK/MoltenVK/Commands/MVKCommandResourceFactory.mm
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandResourceFactory.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandResourceFactory.mm
+@@ -563,6 +563,13 @@
+ 	return newMTLComputePipelineState("cmdDrawIndirectPopulateIndexes", owner);
+ }
+ 
++id<MTLComputePipelineState> MVKCommandResourceFactory::newCmdDrawGeometryIndirectConvertBuffersMTLComputePipelineState(bool indexed,
++                                                                                       MVKVulkanAPIDeviceObject* owner) {
++    return newMTLComputePipelineState(indexed
++        ? "cmdDrawIndexedGeometryIndirectConvertBuffers"
++        : "cmdDrawGeometryIndirectConvertBuffers", owner);
++}
++
+ id<MTLComputePipelineState> MVKCommandResourceFactory::newCmdDrawIndirectTessConvertBuffersMTLComputePipelineState(bool indexed,
+ 																												   MVKVulkanAPIDeviceObject* owner) {
+ 	return newMTLComputePipelineState(indexed
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandEncodingPool.h b/MoltenVK/MoltenVK/Commands/MVKCommandEncodingPool.h
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandEncodingPool.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandEncodingPool.h
+@@ -118,6 +118,9 @@
+ 	/** Returns a MTLComputePipelineState for populating an indirect index buffer from a non-indexed indirect buffer. */
+ 	id<MTLComputePipelineState> getCmdDrawIndirectPopulateIndexesMTLComputePipelineState();
+ 
++	/** Returns the cached conversion pipeline for GPU-side geometry indirect draws. */
++	id<MTLComputePipelineState> getCmdDrawGeometryIndirectConvertBuffersMTLComputePipelineState(bool indexed);
++
+ 	/** Returns a MTLComputePipelineState for converting the contents of an indirect buffer. */
+ 	id<MTLComputePipelineState> getCmdDrawIndirectConvertBuffersMTLComputePipelineState(bool indexed);
+ 
+@@ -166,6 +169,7 @@
+     id<MTLComputePipelineState> _mtlCopyBufferBytesComputePipelineState = nil;
+ 	id<MTLComputePipelineState> _mtlFillBufferComputePipelineState = nil;
+ 	id<MTLComputePipelineState> _mtlDrawIndirectPopulateIndexesComputePipelineState = nil;
++	id<MTLComputePipelineState> _mtlDrawGeometryIndirectConvertBuffersComputePipelineState[2] = {nil, nil};
+ 	// 6 slots, first 3 for non array textures, last 3 for array textures
+ 	static constexpr uint32_t kColorImageCount = 6u;
+ 	id<MTLComputePipelineState> _mtlClearColorImageComputePipelineState[kColorImageCount] = {nil, nil, nil, nil, nil, nil};
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandEncodingPool.mm b/MoltenVK/MoltenVK/Commands/MVKCommandEncodingPool.mm
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandEncodingPool.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandEncodingPool.mm
+@@ -145,6 +145,11 @@
+ 	MVK_ENC_REZ_ACCESS(_mtlDrawIndirectConvertBuffersComputePipelineState[indexed ? 1 : 0], newCmdDrawIndirectConvertBuffersMTLComputePipelineState(indexed, _commandPool));
+ }
+ 
++id<MTLComputePipelineState> MVKCommandEncodingPool::getCmdDrawGeometryIndirectConvertBuffersMTLComputePipelineState(bool indexed) {
++    MVK_ENC_REZ_ACCESS(_mtlDrawGeometryIndirectConvertBuffersComputePipelineState[indexed ? 1 : 0],
++                       newCmdDrawGeometryIndirectConvertBuffersMTLComputePipelineState(indexed, _commandPool));
++}
++
+ id<MTLComputePipelineState> MVKCommandEncodingPool::getCmdDrawIndirectTessConvertBuffersMTLComputePipelineState(bool indexed) {
+ 	MVK_ENC_REZ_ACCESS(_mtlDrawIndirectTessConvertBuffersComputePipelineState[indexed ? 1 : 0], newCmdDrawIndirectTessConvertBuffersMTLComputePipelineState(indexed, _commandPool));
+ }
+@@ -225,6 +230,10 @@
+ 
+ 	[_mtlDrawIndirectPopulateIndexesComputePipelineState release];
+ 	_mtlDrawIndirectPopulateIndexesComputePipelineState = nil;
++	for (auto& state : _mtlDrawGeometryIndirectConvertBuffersComputePipelineState) {
++		[state release];
++		state = nil;
++	}
+ 
+ 	for (uint32_t i = 0; i < kColorImageCount; i++)
+ 	{
