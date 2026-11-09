@@ -878,9 +878,11 @@ build_moltenvk() {
         ;;
     esac
     env -i PATH=$PATH HOME=$HOME LANG=en_US.UTF-8 ./fetchDependencies --$MVK_PLATFORM --spirv-cross-root "$SPIRV_CROSS_PATCHED" -v
-    if ! git apply --reverse --check "$PATCHES_DIR/moltenvk-geometry-fan.patch" >/dev/null 2>&1; then
-        git apply "$PATCHES_DIR/moltenvk-geometry-fan.patch"
-    fi
+    for MVK_PATCH in "$PATCHES_DIR/moltenvk-geometry-fan.patch" "$PATCHES_DIR/moltenvk-depth-host-transfer.patch"; do
+        if ! git apply --reverse --check "$MVK_PATCH" >/dev/null 2>&1; then
+            git apply "$MVK_PATCH"
+        fi
+    done
     env -i PATH=$PATH HOME=$HOME LANG=en_US.UTF-8 make $MVK_PLATFORM$DEBUG_FLAGS
     if [ "$PLATFORM" == "macos" ]; then
         $(xcrun --sdk $SDK --find lipo) "Package/$BUILD_CONFIGURATION/MoltenVK/dylib/macOS/libMoltenVK.dylib" -extract $ARCH -output "$PREFIX/lib/libMoltenVK.dylib"
