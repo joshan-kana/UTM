@@ -852,6 +852,7 @@ build_moltenvk() {
     git -C "$SPIRV_CROSS_PATCHED" checkout -f "$(cat "$MVK_DIR/ExternalRevisions/SPIRV-Cross_repo_revision")"
     git -C "$SPIRV_CROSS_PATCHED" apply "$PATCHES_DIR/spirv-cross-geometry.patch"
     git -C "$SPIRV_CROSS_PATCHED" apply "$PATCHES_DIR/spirv-cross-depth-clip-enable.patch"
+    git -C "$SPIRV_CROSS_PATCHED" apply "$PATCHES_DIR/spirv-cross-geometry-invocations.patch"
 
     pushd "$MVK_DIR"
     # for xcpretty if installed
@@ -890,6 +891,9 @@ build_moltenvk() {
     fi
     if ! git apply --reverse --check "$PATCHES_DIR/moltenvk-geometry-capability-limits.patch" >/dev/null 2>&1; then
         git apply "$PATCHES_DIR/moltenvk-geometry-capability-limits.patch"
+    fi
+    if ! git apply --reverse --check "$PATCHES_DIR/moltenvk-geometry-invocations.patch" >/dev/null 2>&1; then
+        git apply "$PATCHES_DIR/moltenvk-geometry-invocations.patch"
     fi
     env -i PATH=$PATH HOME=$HOME LANG=en_US.UTF-8 SPIRV_CROSS_PATCHED="$SPIRV_CROSS_PATCHED" make $MVK_PLATFORM$DEBUG_FLAGS
     if [ "$PLATFORM" == "macos" ]; then
