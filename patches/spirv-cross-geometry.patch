@@ -180,7 +180,7 @@ index 2b291113..895eb4c3 100644
  				    {
 -					    bool is_array_type = !type.array.empty() && !is_var_runtime_size_array(var);
 +					    bool is_array_type = !type.array.empty() && !is_var_runtime_size_array(var) &&
-+					                         (!msl_options.for_mesh_pipeline || get_resource_array_size(type, var_id) > 1);
++					                         get_resource_array_size(type, var_id) > 1;
 
  					    uint32_t desc_set = get_decoration(var_id, DecorationDescriptorSet);
  					    if (var.storage != StorageClassPushConstant && descriptor_set_is_argument_buffer(desc_set))
