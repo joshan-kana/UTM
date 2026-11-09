@@ -59,6 +59,10 @@ struct UTMAppleConfigurationSerial: Codable, Identifiable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         mode = try values.decode(SerialMode.self, forKey: .mode)
         terminal = try values.decodeIfPresent(UTMConfigurationTerminal.self, forKey: .terminal)
+        // the built-in terminal always has settings, as `setMode(_:)` ensures when editing
+        if mode == .builtin && terminal == nil {
+            terminal = .init()
+        }
     }
     
     func encode(to encoder: Encoder) throws {
@@ -81,5 +85,17 @@ struct UTMAppleConfigurationSerial: Codable, Identifiable {
         let serialConfig = VZVirtioConsoleDeviceSerialPortConfiguration()
         serialConfig.attachment = attachment
         return serialConfig
+    }
+}
+
+// MARK: - Editing rules
+
+extension UTMAppleConfigurationSerial {
+    /// Changes the connection mode; the built-in terminal gets default settings if it has none.
+    mutating func setMode(_ mode: SerialMode) {
+        self.mode = mode
+        if mode == .builtin && terminal == nil {
+            terminal = .init()
+        }
     }
 }

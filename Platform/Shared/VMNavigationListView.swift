@@ -178,6 +178,7 @@ private struct VMListModifier: ViewModifier {
                     } label: {
                         Image(systemName: "plus") // SwiftUI bug: tip won't show up if this is a label
                     }.help("Create a new VM")
+                    .accessibilityIdentifier(UTMAccessibilityID.Library.newVM)
                     .popoverTip(createTip, arrowEdge: .top)
                 } else {
                     newButton
@@ -219,6 +220,7 @@ private struct VMListModifier: ViewModifier {
                 } label: {
                     Label("Settings", systemImage: "gear")
                 }
+                .accessibilityIdentifier(UTMAccessibilityID.Library.settings)
             }
             #endif
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -291,5 +293,6 @@ private struct VMListModifier: ViewModifier {
         Button(action: { data.newVM() }, label: {
             Label("New VM", systemImage: "plus").labelStyle(.iconOnly)
         }).help("Create a new VM")
+        .accessibilityIdentifier(UTMAccessibilityID.Library.newVM)
     }
 }

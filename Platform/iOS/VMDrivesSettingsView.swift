@@ -40,11 +40,13 @@ struct VMDrivesSettingsView: View {
         } label: {
             Text("Import Drive…")
         }
+        .accessibilityIdentifier(UTMAccessibilityID.Settings.importDrive)
         Button {
             isCreateDriveShown.toggle()
         } label: {
             Text("New Drive…")
         }
+        .accessibilityIdentifier(UTMAccessibilityID.Settings.newDrive)
         .sheet(isPresented: $isCreateDriveShown) {
             CreateDrive(newDrive: UTMQemuConfigurationDrive(forArchitecture: config.system.architecture, target: config.system.target), onDismiss: newDrive)
         }
@@ -106,9 +108,11 @@ private struct CreateDrive: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Cancel", action: cancel)
+                            .accessibilityIdentifier(UTMAccessibilityID.Drive.cancel)
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done", action: done)
+                            .accessibilityIdentifier(UTMAccessibilityID.Drive.create)
                     }
                 }
         }.navigationViewStyle(.stack)
