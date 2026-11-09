@@ -1,0 +1,97 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -1975,6 +1975,10 @@
+ 		statement("int64_t indexBuffer;");
+ 		statement("uint32_t vertexStrides[31];");
+ 		statement("uint32_t firstVertex;");
++		statement("uint32_t firstIndex;");
++		statement("int32_t baseVertex;");
++		statement("uint32_t firstInstance;");
++		statement("uint32_t drawIndex;");
+ 		statement("uint32_t geometryInvocations;");
+ 		statement("uint8_t topoStrip;");
+ 		statement("uint8_t topoFan;");
+@@ -2047,7 +2051,7 @@
+ 			SPIRV_CROSS_THROW("Input primitive type not supported");
+ 		}
+ 
+-		statement("int instanceIndex = positionInGrid.y;");
++		statement("int instanceIndex = positionInGrid.y + drawInfo->firstInstance;");
+ 
+ 		statement("for (int i = 0; i < vertexCount; ++i)");
+ 		begin_scope();
+@@ -2056,6 +2060,7 @@
+ 
+ 		statement("if (drawInfo->indexed)");
+ 		begin_scope();
++		statement("indexPosition += drawInfo->firstIndex;");
+ 
+ 		statement(R"END(
+ 		if (drawInfo->indexSize == 1) {
+@@ -2075,8 +2080,9 @@
+ 			}
+ 		})END");
+ 
++		statement("vertexIndex += drawInfo->baseVertex;");
+ 		end_scope();
+-		statement("else vertexIndex = indexPosition + (drawInfo->topoFan ? drawInfo->firstVertex : 0);");
++		statement("else vertexIndex = indexPosition + drawInfo->firstVertex;");
+ 
+ 		if (stage_in_var_id)
+ 		{
+@@ -2200,7 +2206,17 @@
+ 					break;
+ 				}
+ 				case BuiltInBaseInstance: {
+-					statement(need_comma ? ", " : "", "0");
++					statement(need_comma ? ", " : "", "drawInfo->firstInstance");
++					need_comma = true;
++					break;
++				}
++				case BuiltInBaseVertex: {
++					statement(need_comma ? ", " : "", "drawInfo->baseVertex");
++					need_comma = true;
++					break;
++				}
++				case BuiltInDrawIndex: {
++					statement(need_comma ? ", " : "", "drawInfo->drawIndex");
+ 					need_comma = true;
+ 					break;
+ 				}
+@@ -15350,6 +15366,8 @@
+ 				return string(" [[") + builtin_qualifier(builtin) + "]]";
+ 
+ 			case BuiltInDrawIndex:
++				if (msl_options.for_mesh_pipeline)
++					return "";
+ 				SPIRV_CROSS_THROW("DrawIndex is not supported in MSL.");
+ 
+ 			default:
+@@ -19771,6 +19789,8 @@
+ 			SPIRV_CROSS_THROW("BaseInstance requires Metal 1.1 and Mac or Apple A9+ hardware.");
+ 		}
+ 	case BuiltInDrawIndex:
++		if (msl_options.for_mesh_pipeline)
++			return "gl_DrawIndex";
+ 		SPIRV_CROSS_THROW("DrawIndex is not supported in MSL.");
+ 
+ 	// When used in the entry function, output builtins are qualified with output struct name.
+@@ -19897,6 +19917,8 @@
+ 	case BuiltInBaseInstance:
+ 		return "base_instance";
+ 	case BuiltInDrawIndex:
++		if (msl_options.for_mesh_pipeline)
++			return "";
+ 		SPIRV_CROSS_THROW("DrawIndex is not supported in MSL.");
+ 
+ 	// Vertex function out
+@@ -20122,6 +20144,8 @@
+ 	case BuiltInBaseInstance:
+ 		return "uint";
+ 	case BuiltInDrawIndex:
++		if (msl_options.for_mesh_pipeline)
++			return "uint";
+ 		SPIRV_CROSS_THROW("DrawIndex is not supported in MSL.");
+ 
+ 	// Vertex function out
