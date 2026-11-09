@@ -1,0 +1,33 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -2769,7 +2769,11 @@
+     _features.robustBufferAccess = true; // NOTE: Required by spec, not fully supported by non-Apple GPUs.
+     _features.fullDrawIndexUint32 = true;
+     _features.independentBlend = true;
+-    _features.geometryShader = true;  // XXX Required by DXVK for D3D10
++    // Geometry stages are implemented with Metal mesh shaders.
++#if MVK_XCODE_14
++    _features.geometryShader = _metalFeatures.mslVersionEnum >= MTLLanguageVersion3_0 &&
++                               (supportsMTLGPUFamily(Apple7) || supportsMTLGPUFamily(Mac2));
++#endif
+     _features.sampleRateShading = true;
+ 	_features.logicOp = getMVKConfig().useMetalPrivateAPI;
+     _features.depthBiasClamp = true;
+@@ -3128,11 +3132,11 @@
+ 
+     _properties.limits.sparseAddressSpaceSize = 0;
+ 
+-    _properties.limits.maxGeometryShaderInvocations = 0;
+-    _properties.limits.maxGeometryInputComponents = 0;
+-    _properties.limits.maxGeometryOutputComponents = 0;
+-    _properties.limits.maxGeometryOutputVertices = 0;
+-    _properties.limits.maxGeometryTotalOutputComponents = 0;
++    _properties.limits.maxGeometryShaderInvocations = _features.geometryShader ? 32 : 0;
++    _properties.limits.maxGeometryInputComponents = _features.geometryShader ? 64 : 0;
++    _properties.limits.maxGeometryOutputComponents = _features.geometryShader ? 64 : 0;
++    _properties.limits.maxGeometryOutputVertices = _features.geometryShader ? 256 : 0;
++    _properties.limits.maxGeometryTotalOutputComponents = _features.geometryShader ? 1024 : 0;
+ }
+ 
+ #if MVK_MACOS
