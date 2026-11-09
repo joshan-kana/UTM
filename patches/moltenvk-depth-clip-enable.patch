@@ -1,0 +1,578 @@
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
+index 6969caa1..2867f048 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
+@@ -381,6 +381,19 @@ protected:
+ };
+ 
+ 
++#pragma mark -
++#pragma mark MVKCmdSetDepthClampEnable
++
++class MVKCmdSetDepthClampEnable : public MVKSingleValueCommand<VkBool32> {
++
++public:
++	void encode(MVKCommandEncoder* cmdEncoder) override;
++
++protected:
++	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
++};
++
++
+ #pragma mark -
+ #pragma mark MVKCmdSetDepthClipEnable
+ 
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.mm b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.mm
+index a6578fef..0c4e6908 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.mm
+@@ -363,11 +363,19 @@ void MVKCmdSetDepthWriteEnable::encode(MVKCommandEncoder* cmdEncoder) {
+ }
+ 
+ 
++#pragma mark -
++#pragma mark MVKCmdSetDepthClampEnable
++
++void MVKCmdSetDepthClampEnable::encode(MVKCommandEncoder* cmdEncoder) {
++	cmdEncoder->getState().updateDynamicState(MVKRenderStateFlag::DepthClampEnable)._renderState.enable.set(MVKRenderStateEnableFlag::DepthClamp, _value);
++}
++
++
+ #pragma mark -
+ #pragma mark MVKCmdSetDepthClipEnable
+ 
+ void MVKCmdSetDepthClipEnable::encode(MVKCommandEncoder* cmdEncoder) {
+-	cmdEncoder->getState().updateDynamicState(MVKRenderStateFlag::DepthClipEnable)._renderState.enable.set(MVKRenderStateEnableFlag::DepthClamp, !_value);
++	cmdEncoder->getState().updateDynamicState(MVKRenderStateFlag::DepthClipEnable)._renderState.depthClipEnable = _value ? MVKDepthClipEnable::True : MVKDepthClipEnable::False;
+ }
+ 
+ 
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.h b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.h
+index fccf5779..58d73ba4 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.h
+@@ -156,10 +156,19 @@ struct MVKVulkanSharedCommandEncoderState {
+ 	MVKSmallVector<uint8_t, 128> _pushConstants;
+ };
+ 
++struct MVKDepthClipState {
++	uint32_t emulateViewportZ = 0;
++	uint32_t emulateDepthClamp = 0;
++	float viewportDepthRanges[kMVKMaxViewportScissorCount][2] = {};
++};
++
++static_assert(sizeof(MVKDepthClipState) == 136, "MVKDepthClipState must match the SPIRV-Cross MSL layout.");
++
+ struct MVKImplicitBufferData {
+ 	MVKSmallVector<uint32_t, 8> bufferSizes;
+ 	MVKSmallVector<uint32_t, 8> dynamicOffsets;
+ 	MVKSmallVector<uint32_t, 8> textureOffsets;
++	MVKDepthClipState depthClipState;
+ };
+ 
+ enum class MVKResourceUsageStages : uint8_t {
+@@ -415,7 +424,7 @@ struct MVKMetalGraphicsCommandEncoderState : public MVKMetalGraphicsCommandEncod
+ 	void bindVertexSampler(id<MTLRenderCommandEncoder> encoder, id<MTLSamplerState> sampler, NSUInteger index);
+ 	template <typename T> void bindFragmentStructBytes(id<MTLComputeCommandEncoder> encoder, const T& t, NSUInteger index) { bindFragmentBytes(encoder, &t, sizeof(T), index); }
+ 	template <typename T> void bindVertexStructBytes(id<MTLComputeCommandEncoder> encoder, const T& t, NSUInteger index) { bindVertexBytes(encoder, &t, sizeof(T), index); }
+-	void bindStateData(id<MTLRenderCommandEncoder> encoder, MVKCommandEncoder& mvkEncoder, const MVKRenderStateData& data, MVKRenderStateFlags flags, const VkViewport* viewports, const VkRect2D* scissors);
++	void bindStateData(id<MTLRenderCommandEncoder> encoder, MVKCommandEncoder& mvkEncoder, const MVKRenderStateData& data, MVKRenderStateFlags flags, const VkRect2D* scissors);
+ 	void bindState(id<MTLRenderCommandEncoder> encoder, MVKCommandEncoder& mvkEncoder, const MVKVulkanGraphicsCommandEncoderState& vkState);
+ 	void prepareDraw(id<MTLRenderCommandEncoder> encoder, MVKCommandEncoder& mvkEncoder, const MVKVulkanGraphicsCommandEncoderState& vkState, const MVKVulkanSharedCommandEncoderState& vkShared);
+ 	void prepareHelperDraw(id<MTLRenderCommandEncoder> encoder, MVKCommandEncoder& mvkEncoder, const MVKHelperDrawState& state);
+@@ -522,6 +531,7 @@ public:
+ 	}
+ 	/** Binds the given graphics pipeline to the Vulkan graphics state, invalidating any necessary resources. */
+ 	void bindGraphicsPipeline(MVKGraphicsPipeline* pipeline);
++	void setGraphicsDepthClipState(const MVKDepthClipState& depthClipState);
+ 	/** Binds the given compute pipeline to the Vulkan graphics state, invalidating any necessary resources. */
+ 	void bindComputePipeline(MVKComputePipeline* pipeline);
+ 	/** Binds the given push constants to the Vulkan state, invalidating any necessary resources. */
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
+index 6e4535ba..5ba82474 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
+@@ -816,6 +816,14 @@ static void bindMetalResources(id<MTLCommandEncoder> encoder,
+ 				binder.setBytes(encoder, viewRange, sizeof(viewRange), idx);
+ 				break;
+ 			}
++			case MVKNonVolatileImplicitBuffer::DepthClip:
++				bindImmediateData(encoder,
++				                  mvkEncoder,
++				                  reinterpret_cast<const uint8_t*>(&implicitBufferData.depthClipState),
++				                  sizeof(implicitBufferData.depthClipState),
++				                  idx,
++				                  binder);
++				break;
+ 			case MVKNonVolatileImplicitBuffer::Count:
+ 				assert(0);
+ 				break;
+@@ -1261,14 +1269,12 @@ void MVKMetalGraphicsCommandEncoderState::changePipeline(MVKGraphicsPipeline* fr
+ 		markDirty(to->getStaticStateFlags());
+ }
+ 
+-static constexpr MVKRenderStateFlags FlagsViewportScissor {
+-	MVKRenderStateFlag::Viewports,
++static constexpr MVKRenderStateFlags FlagsScissor {
+ 	MVKRenderStateFlag::Scissors,
+ };
+ 
+ static constexpr MVKRenderStateFlags FlagsMetalState {
+ 	MVKRenderStateFlag::BlendConstants,
+-	MVKRenderStateFlag::DepthClipEnable,
+ 	MVKRenderStateFlag::FrontFace,
+ 	MVKRenderStateFlag::StencilReference,
+ #if MVK_USE_METAL_PRIVATE_API
+@@ -1277,36 +1283,15 @@ static constexpr MVKRenderStateFlags FlagsMetalState {
+ #endif
+ };
+ 
+-static constexpr MVKRenderStateFlags FlagsHandledByBindStateData = FlagsViewportScissor | FlagsMetalState;
++static constexpr MVKRenderStateFlags FlagsHandledByBindStateData = FlagsScissor | FlagsMetalState;
+ 
+ void MVKMetalGraphicsCommandEncoderState::bindStateData(
+   id<MTLRenderCommandEncoder> encoder,
+   MVKCommandEncoder& mvkEncoder,
+   const MVKRenderStateData& data,
+   MVKRenderStateFlags flags,
+-  const VkViewport* viewports,
+   const VkRect2D* scissors) {
+-	if (flags.hasAny(FlagsViewportScissor)) {
+-		if (flags.has(MVKRenderStateFlag::Viewports) &&
+-		  (_numViewports != data.numViewports || !mvkAreEqual(_viewports, viewports, data.numViewports))) {
+-			_numViewports = data.numViewports;
+-			mvkCopy(_viewports, viewports, data.numViewports);
+-			MTLViewport mtlViewports[kMVKMaxViewportScissorCount];
+-			uint32_t numViewports = data.numViewports;
+-			for (uint32_t i = 0; i < numViewports; i++) {
+-				mtlViewports[i].width = viewports[i].width;
+-				mtlViewports[i].height = viewports[i].height;
+-				mtlViewports[i].originX = viewports[i].x;
+-				mtlViewports[i].originY = viewports[i].y;
+-				mtlViewports[i].znear = viewports[i].minDepth;
+-				mtlViewports[i].zfar = viewports[i].maxDepth;
+-			}
+-			if (numViewports == 1) {
+-				[encoder setViewport:mtlViewports[0]];
+-			} else {
+-				[encoder setViewports:mtlViewports count:numViewports];
+-			}
+-		}
++	if (flags.hasAny(FlagsScissor)) {
+ 		if (flags.has(MVKRenderStateFlag::Scissors) &&
+ 		  (_numScissors != data.numScissors || !mvkAreEqual(_scissors, scissors, data.numScissors))) {
+ 			if (!_flags.has(MVKMetalRenderEncoderStateFlag::RasterizationDisabledByScissor) || _numScissors != data.numScissors)
+@@ -1322,13 +1307,6 @@ void MVKMetalGraphicsCommandEncoderState::bindStateData(
+ 			const float* c = data.blendConstants.float32;
+ 			[encoder setBlendColorRed:c[0] green:c[1] blue:c[2] alpha:c[3]];
+ 		}
+-		if (flags.has(MVKRenderStateFlag::DepthClipEnable)) {
+-			bool enable = data.enable.has(MVKRenderStateEnableFlag::DepthClamp);
+-			if (_flags.has(MVKMetalRenderEncoderStateFlag::DepthClampEnable) != enable) {
+-				_flags.flip(MVKMetalRenderEncoderStateFlag::DepthClampEnable);
+-				[encoder setDepthClipMode:enable ? MTLDepthClipModeClamp : MTLDepthClipModeClip];
+-			}
+-		}
+ 		if (flags.has(MVKRenderStateFlag::FrontFace) && _frontFace != data.frontFace) {
+ 			_frontFace = data.frontFace;
+ 			[encoder setFrontFacingWinding:static_cast<MTLWinding>(data.frontFace)];
+@@ -1373,6 +1351,58 @@ void MVKMetalGraphicsCommandEncoderState::bindState(
+ 	const MVKRenderStateData& dynamicStateData = vk._renderState;
+ #define PICK_STATE(x) (dynamicStateFlags.has(MVKRenderStateFlag::x) ? &dynamicStateData : &staticStateData)
+ 	// Handle anything that requires data from multiple (possibly different) sources out here
++	static constexpr MVKRenderStateFlags FlagsViewportDepthClipClamp = {
++		MVKRenderStateFlag::DepthClampEnable,
++		MVKRenderStateFlag::DepthClipEnable,
++		MVKRenderStateFlag::Viewports,
++	};
++	if (anyStateNeeded.hasAny(FlagsViewportDepthClipClamp)) {
++		_stateReady.addAll(FlagsViewportDepthClipClamp);
++		bool clamp = PICK_STATE(DepthClampEnable)->enable.has(MVKRenderStateEnableFlag::DepthClamp);
++		bool clip = mvkIsDepthClipEnabled(PICK_STATE(DepthClipEnable)->depthClipEnable, clamp);
++		if (_flags.has(MVKMetalRenderEncoderStateFlag::DepthClampEnable) == clip) {
++			_flags.flip(MVKMetalRenderEncoderStateFlag::DepthClampEnable);
++			[encoder setDepthClipMode:clip ? MTLDepthClipModeClip : MTLDepthClipModeClamp];
++		}
++
++		// Metal supports either depth clipping or clamping. Emulate only the Vulkan
++		// combinations where both are disabled or both are enabled.
++		MVKDepthClipState depthClipState;
++		depthClipState.emulateDepthClamp = clamp && clip;
++		depthClipState.emulateViewportZ = !clamp && !clip;
++		const VkViewport* viewports = dynamicStateFlags.has(MVKRenderStateFlag::Viewports) ? vk._viewports : pipeline->getViewports();
++		uint32_t numViewports = PICK_STATE(Viewports)->numViewports;
++		VkViewport adjustedViewports[kMVKMaxViewportScissorCount];
++		for (uint32_t i = 0; i < numViewports; i++) {
++			const VkViewport& vp = viewports[i];
++			adjustedViewports[i] = vp;
++			if (depthClipState.emulateDepthClamp) {
++				depthClipState.viewportDepthRanges[i][0] = std::min(vp.minDepth, vp.maxDepth);
++				depthClipState.viewportDepthRanges[i][1] = std::max(vp.minDepth, vp.maxDepth);
++			}
++			if (depthClipState.emulateViewportZ) {
++				depthClipState.viewportDepthRanges[i][0] = vp.minDepth;
++				depthClipState.viewportDepthRanges[i][1] = vp.maxDepth;
++				adjustedViewports[i].minDepth = 0;
++				adjustedViewports[i].maxDepth = 1;
++			}
++		}
++		mvkEncoder.getState().setGraphicsDepthClipState(depthClipState);
++
++		if (_numViewports != numViewports || !mvkAreEqual(_viewports, adjustedViewports, numViewports)) {
++			_numViewports = numViewports;
++			mvkCopy(_viewports, adjustedViewports, numViewports);
++			MTLViewport mtlViewports[kMVKMaxViewportScissorCount];
++			for (uint32_t i = 0; i < numViewports; i++) {
++				mtlViewports[i] = mvkMTLViewportFromVkViewport(adjustedViewports[i]);
++			}
++			if (numViewports == 1) {
++				[encoder setViewport:mtlViewports[0]];
++			} else {
++				[encoder setViewports:mtlViewports count:numViewports];
++			}
++		}
++	}
+ 
+ 	// Polygon mode and primitive topology need to be handled specially, as we implement point mode by switching the primitive topology
+ 	// Cull mode and discard both are specially handled only when using dynamic state
+@@ -1535,10 +1565,10 @@ void MVKMetalGraphicsCommandEncoderState::bindState(
+ 	MVKRenderStateFlags handledByBindStateData = anyStateNeeded & FlagsHandledByBindStateData;
+ 	_stateReady.addAll(handledByBindStateData);
+ 	if (MVKRenderStateFlags neededStatic = handledByBindStateData & staticStateFlags; !neededStatic.empty()) {
+-		bindStateData(encoder, mvkEncoder, staticStateData, neededStatic, pipeline->getViewports(), pipeline->getScissors());
++		bindStateData(encoder, mvkEncoder, staticStateData, neededStatic, pipeline->getScissors());
+ 	}
+ 	if (MVKRenderStateFlags neededDynamic = handledByBindStateData & dynamicStateFlags; !neededDynamic.empty()) {
+-		bindStateData(encoder, mvkEncoder, dynamicStateData, neededDynamic, vk._viewports, vk._scissors);
++		bindStateData(encoder, mvkEncoder, dynamicStateData, neededDynamic, vk._scissors);
+ 	}
+ 
+ 	// Scissor can be affected by a number of things so do it at the end
+@@ -1862,6 +1892,19 @@ static void invalidateImplicitBuffer(MVKCommandEncoderState& state, VkPipelineBi
+ 	state.applyToActiveMTLState(bindPoint, [buffer](auto& mtl){ invalidateImplicitBuffer(mtl, buffer); });
+ }
+ 
++void MVKCommandEncoderState::setGraphicsDepthClipState(const MVKDepthClipState& depthClipState) {
++	bool changed = false;
++	for (auto& stageData : _vkGraphics._implicitBufferData) {
++		if (!mvkAreEqual(&stageData.depthClipState, &depthClipState)) {
++			stageData.depthClipState = depthClipState;
++			changed = true;
++		}
++	}
++	if (changed) {
++		invalidateImplicitBuffer(*this, VK_PIPELINE_BIND_POINT_GRAPHICS, MVKNonVolatileImplicitBuffer::DepthClip);
++	}
++}
++
+ void MVKCommandEncoderState::bindGraphicsPipeline(MVKGraphicsPipeline* pipeline) {
+ 	_mtlGraphics.changePipeline(_vkGraphics._pipeline, pipeline);
+ 	_vkGraphics._pipeline = pipeline;
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandTypePools.def b/MoltenVK/MoltenVK/Commands/MVKCommandTypePools.def
+index db2de3b6..29ae8849 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandTypePools.def
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandTypePools.def
+@@ -96,6 +96,7 @@ MVK_CMD_TYPE_POOL(SetDepthBounds)
+ MVK_CMD_TYPE_POOL(SetDepthBoundsTestEnable)
+ MVK_CMD_TYPE_POOL(SetDepthTestEnable)
+ MVK_CMD_TYPE_POOL(SetDepthWriteEnable)
++MVK_CMD_TYPE_POOL(SetDepthClampEnable)
+ MVK_CMD_TYPE_POOL(SetDepthClipEnable)
+ MVK_CMD_TYPE_POOL(SetDepthCompareOp)
+ MVK_CMD_TYPE_POOL(SetStencilTestEnable)
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+index e451619c..93f38c9e 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -675,6 +675,11 @@ void MVKPhysicalDevice::getFeatures(VkPhysicalDeviceFeatures2* features) {
+ 				depthFeatures->depthClipControl = true;
+ 				break;
+ 			}
++			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT: {
++				auto* depthFeatures = (VkPhysicalDeviceDepthClipEnableFeaturesEXT*)next;
++				depthFeatures->depthClipEnable = true;
++				break;
++			}
+ 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT: {
+ 				auto* extDynState = (VkPhysicalDeviceExtendedDynamicStateFeaturesEXT*)next;
+ 				extDynState->extendedDynamicState = true;
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDeviceFeatureStructs.def b/MoltenVK/MoltenVK/GPUObjects/MVKDeviceFeatureStructs.def
+index f489107d..857aa1de 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDeviceFeatureStructs.def
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDeviceFeatureStructs.def
+@@ -98,6 +98,7 @@ MVK_DEVICE_FEATURE_EXTN(ShaderSubgroupUniformControlFlow, SHADER_SUBGROUP_UNIFOR
+ MVK_DEVICE_FEATURE_EXTN(SwapchainMaintenance1,            SWAPCHAIN_MAINTENANCE_1,              KHR,   1)
+ MVK_DEVICE_FEATURE_EXTN(4444Formats,                      4444_FORMATS,                         EXT,   2)
+ MVK_DEVICE_FEATURE_EXTN(DepthClipControl,                 DEPTH_CLIP_CONTROL,                   EXT,   1)
++MVK_DEVICE_FEATURE_EXTN(DepthClipEnable,                  DEPTH_CLIP_ENABLE,                    EXT,   1)
+ MVK_DEVICE_FEATURE_EXTN(ExtendedDynamicState,             EXTENDED_DYNAMIC_STATE,               EXT,   1)
+ MVK_DEVICE_FEATURE_EXTN(ExtendedDynamicState2,            EXTENDED_DYNAMIC_STATE_2,             EXT,   3)
+ MVK_DEVICE_FEATURE_EXTN(ExtendedDynamicState3,            EXTENDED_DYNAMIC_STATE_3,             EXT,  31)
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+index c3a85610..4c74dfcb 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -439,6 +439,7 @@ static void populateResourceUsage(MVKPipelineStageResourceInfo& dst, SPIRVToMSLC
+ 	dst.implicitBuffers.needed |= MVKImplicitBufferList(MVKImplicitBuffer::TextureOffset, results.needsTextureOffsetBuffer);
+ 	dst.implicitBuffers.needed |= MVKImplicitBufferList(MVKImplicitBuffer::DispatchBase,  results.needsDispatchBaseBuffer);
+ 	dst.implicitBuffers.needed |= MVKImplicitBufferList(MVKImplicitBuffer::ViewRange,     results.needsViewRangeBuffer);
++	dst.implicitBuffers.needed |= MVKImplicitBufferList(MVKImplicitBuffer::DepthClip,     results.needsDepthClipStateBuffer);
+ 
+ 	typedef SPIRV_CROSS_NAMESPACE::SPIRType SPIRType;
+ 	bool isArgBuf[kMVKMaxDescriptorSetCount] = {};
+@@ -675,7 +676,7 @@ static MVKRenderStateFlags getRenderStateFlags(VkDynamicState vk) {
+ 		case VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE:           return MVKRenderStateFlag::DepthBiasEnable;
+ 		case VK_DYNAMIC_STATE_DEPTH_BOUNDS:                return MVKRenderStateFlag::DepthBounds;
+ 		case VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE:    return MVKRenderStateFlag::DepthBoundsTestEnable;
+-		case VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT:      return MVKRenderStateFlag::DepthClipEnable;
++		case VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT:      return MVKRenderStateFlag::DepthClampEnable;
+ 		case VK_DYNAMIC_STATE_DEPTH_CLIP_ENABLE_EXT:       return MVKRenderStateFlag::DepthClipEnable;
+ 		case VK_DYNAMIC_STATE_DEPTH_COMPARE_OP:            return MVKRenderStateFlag::DepthCompareOp;
+ 		case VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE:           return MVKRenderStateFlag::DepthTestEnable;
+@@ -891,6 +892,9 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
+ 		if (const auto* line = mvkFindStructInChain<VkPipelineRasterizationLineStateCreateInfo>(rs, VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO)) {
+ 			_staticStateData.setLineRasterizationMode(line->lineRasterizationMode);
+ 		}
++		if (const auto* depthClip = mvkFindStructInChain<VkPipelineRasterizationDepthClipStateCreateInfoEXT>(rs, VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_DEPTH_CLIP_STATE_CREATE_INFO_EXT)) {
++			_staticStateData.depthClipEnable = depthClip->depthClipEnable ? MVKDepthClipEnable::True : MVKDepthClipEnable::False;
++		}
+ #if MVK_USE_METAL_PRIVATE_API
+ 		if (const auto* provokingVertex = mvkFindStructInChain<VkPipelineRasterizationProvokingVertexStateCreateInfoEXT>(rs, VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_PROVOKING_VERTEX_STATE_CREATE_INFO_EXT)) {
+ 			_staticStateData.provokingVertexMode = mvkMTLProvokingVertexModeFromVkProvokingVertexMode(provokingVertex->provokingVertexMode);
+@@ -1587,6 +1591,7 @@ static constexpr const char* getImplicitBufferName(MVKImplicitBuffer buffer) {
+ 		case MVKImplicitBuffer::DynamicOffset:  return "dynamic offset";
+ 		case MVKImplicitBuffer::TextureOffset:  return "texture offset";
+ 		case MVKImplicitBuffer::ViewRange:      return "view range";
++		case MVKImplicitBuffer::DepthClip:      return "depth clip state";
+ 		case MVKImplicitBuffer::IndirectParams: return "indirect parameter";
+ 		case MVKImplicitBuffer::Output:         return "per-vertex output";
+ 		case MVKImplicitBuffer::PatchOutput:    return "per-patch output";
+@@ -1616,6 +1621,24 @@ static void addCommonImplicitBuffersToShaderConfig(SPIRVToMSLConversionConfigura
+ 	dst.options.mslOptions.texture_offset_buffer_index = src[MVKImplicitBuffer::TextureOffset];
+ }
+ 
++static bool isPossibleBothDepthClipClamp(MVKRenderStateFlags dynamic, const MVKRenderStateData& state, bool enabled) {
++	bool dynamicClamp = dynamic.has(MVKRenderStateFlag::DepthClampEnable);
++	bool dynamicClip = dynamic.has(MVKRenderStateFlag::DepthClipEnable);
++
++	// Without explicit clip state, Vulkan defines clip as the inverse of clamp.
++	if (!dynamicClip && state.depthClipEnable == MVKDepthClipEnable::NotClamp) { return false; }
++
++	bool depthClamp = state.enable.has(MVKRenderStateEnableFlag::DepthClamp);
++	bool staticClampMatch = depthClamp == enabled;
++	bool staticClipMatch = mvkIsDepthClipEnabled(state.depthClipEnable, depthClamp) == enabled;
++	return (dynamicClamp || staticClampMatch) && (dynamicClip || staticClipMatch);
++}
++
++static void setDepthClipConfig(SPIRVToMSLConversionConfiguration& shaderConfig, const MVKOnePerEnumEntry<uint8_t, MVKImplicitBuffer>& implicit, bool enable) {
++	shaderConfig.options.mslOptions.emulate_depth_clip_enable = enable;
++	shaderConfig.options.mslOptions.depth_clip_state_buffer_index = enable ? implicit[MVKImplicitBuffer::DepthClip] : 0;
++}
++
+ bool MVKGraphicsPipeline::verifyImplicitBuffers(MVKShaderStage stage) {
+ 	const char* stageNames[] = {
+ 		"Vertex",
+@@ -1646,6 +1669,7 @@ bool MVKGraphicsPipeline::addVertexShaderToPipeline(MTLRenderPipelineDescriptor*
+ 	shaderConfig.options.mslOptions.robust_buffer_access2 = shouldEnableRobustBufferAccess2(this, pCreateInfo, pVertexSS);
+ 	shaderConfig.options.mslOptions.robust_image_access2 = shouldEnableRobustImageAccess2(this, pCreateInfo, pVertexSS);
+     addVertexInputToShaderConversionConfig(shaderConfig, pCreateInfo);
++	setDepthClipConfig(shaderConfig, implicit, _isRasterizing && isPossibleBothDepthClipClamp(_dynamicStateFlags, _staticStateData, false));
+ 
+ 	MVKMTLFunction func = getMTLFunction(shaderConfig, pVertexSS, pVertexFB, _vertexModule, "Vertex");
+ 	id<MTLFunction> mtlFunc = func.getMTLFunction();
+@@ -1925,6 +1949,7 @@ bool MVKGraphicsPipeline::addVertexShaderToPipeline(MTLComputePipelineDescriptor
+ 	shaderConfig.options.mslOptions.disable_rasterization = true;
+ 	shaderConfig.options.mslOptions.robust_buffer_access2 = shouldEnableRobustBufferAccess2(this, pCreateInfo, pVertexSS);
+ 	shaderConfig.options.mslOptions.robust_image_access2 = shouldEnableRobustImageAccess2(this, pCreateInfo, pVertexSS);
++	setDepthClipConfig(shaderConfig, implicit, false);
+     addVertexInputToShaderConversionConfig(shaderConfig, pCreateInfo);
+ 	addNextStageInputToShaderConversionConfig(shaderConfig, tcInputs);
+ 
+@@ -1973,6 +1998,7 @@ bool MVKGraphicsPipeline::addTessCtlShaderToPipeline(MTLComputePipelineDescripto
+ 	shaderConfig.options.mslOptions.fixed_subgroup_size = mvkIsAnyFlagEnabled(pTessCtlSS->flags, VK_PIPELINE_SHADER_STAGE_CREATE_ALLOW_VARYING_SUBGROUP_SIZE_BIT) ? 0 : getMetalFeatures().maxSubgroupSize;
+ 	shaderConfig.options.mslOptions.robust_buffer_access2 = shouldEnableRobustBufferAccess2(this, pCreateInfo, pTessCtlSS);
+ 	shaderConfig.options.mslOptions.robust_image_access2 = shouldEnableRobustImageAccess2(this, pCreateInfo, pTessCtlSS);
++	setDepthClipConfig(shaderConfig, implicit, false);
+ 	addPrevStageOutputToShaderConversionConfig(shaderConfig, vtxOutputs);
+ 	addNextStageInputToShaderConversionConfig(shaderConfig, teInputs);
+ 
+@@ -2011,6 +2037,7 @@ bool MVKGraphicsPipeline::addTessEvalShaderToPipeline(MTLRenderPipelineDescripto
+ 	shaderConfig.options.mslOptions.disable_rasterization = !_isRasterizing;
+ 	shaderConfig.options.mslOptions.robust_buffer_access2 = shouldEnableRobustBufferAccess2(this, pCreateInfo, pTessEvalSS);
+ 	shaderConfig.options.mslOptions.robust_image_access2 = shouldEnableRobustImageAccess2(this, pCreateInfo, pTessEvalSS);
++	setDepthClipConfig(shaderConfig, implicit, _isRasterizing && isPossibleBothDepthClipClamp(_dynamicStateFlags, _staticStateData, false));
+ 	addPrevStageOutputToShaderConversionConfig(shaderConfig, tcOutputs);
+ 
+ 	MVKMTLFunction func = getMTLFunction(shaderConfig, pTessEvalSS, pTessEvalFB, _tessEvalModule, "Tessellation evaluation");
+@@ -2047,6 +2074,7 @@ bool MVKGraphicsPipeline::addFragmentShaderToPipeline(T* plDesc,
+ 		shaderConfig.options.mslOptions.capture_output_to_buffer = false;
+ 		shaderConfig.options.mslOptions.fixed_subgroup_size = mvkIsAnyFlagEnabled(pFragmentSS->flags, VK_PIPELINE_SHADER_STAGE_CREATE_ALLOW_VARYING_SUBGROUP_SIZE_BIT) ? 0 : mtlFeats.maxSubgroupSize;
+ 		shaderConfig.options.mslOptions.check_discarded_frag_stores = true;
++		setDepthClipConfig(shaderConfig, implicit, _isRasterizing && isPossibleBothDepthClipClamp(_dynamicStateFlags, _staticStateData, true));
+ 		/* Enabling makes dEQP-VK.fragment_shader_interlock.basic.discard.image.pixel_ordered.1xaa.no_sample_shading.1024x1024 and similar tests fail. Requires investigation */
+ 		shaderConfig.options.mslOptions.force_fragment_with_side_effects_execution = false;
+ 		shaderConfig.options.mslOptions.input_attachment_is_ds_attachment = _inputAttachmentIsDSAttachment;
+@@ -2460,6 +2488,7 @@ void MVKGraphicsPipeline::initShaderConversionConfig(SPIRVToMSLConversionConfigu
+ 		_stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::DynamicOffset]  = getImplicitBufferIndex(stage, 1);
+ 		_stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::BufferSize]     = getImplicitBufferIndex(stage, 2);
+ 		_stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::Output]         = getImplicitBufferIndex(stage, 4);
++		_stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::DepthClip]       = getImplicitBufferIndex(stage, 8);
+ 		uint32_t extra = getImplicitBufferIndex(stage, 3);
+ 		switch (stage) {
+ 			case kMVKShaderStageVertex:
+@@ -3239,6 +3268,9 @@ namespace SPIRV_CROSS_NAMESPACE {
+ 				opt.draw_info_index,
+ 				opt.xfb_buffer_index,
+ 				opt.texture_offset_buffer_index,
++				opt.draw_id_buffer_index,
++				opt.reversed_depth_viewport_buffer_index,
++				opt.depth_clip_state_buffer_index,
+ 				opt.shader_input_wg_index,
+ 				opt.device_index,
+ 				opt.enable_frag_output_mask,
+@@ -3257,6 +3289,8 @@ namespace SPIRV_CROSS_NAMESPACE {
+ 				opt.view_index_from_device_index,
+ 				opt.dispatch_base,
+ 				opt.texture_1D_as_2D,
++				opt.emulate_reversed_depth_viewport,
++				opt.emulate_depth_clip_enable,
+ 				opt.argument_buffers,
+ 				opt.argument_buffers_tier,
+ 				opt.runtime_array_rich_descriptor,
+@@ -3432,6 +3466,7 @@ namespace mvk {
+ 				scr.needsDispatchBaseBuffer,
+ 				scr.needsViewRangeBuffer,
+ 				scr.needsXfbBuffer,
++				scr.needsDepthClipStateBuffer,
+ 				scr.usesPhysicalStorageBufferAddressesCapability);
+ 	}
+ 
+@@ -3598,18 +3633,18 @@ static size_t mvkValidateCerealArchiveSize(size_t padByteCnt = 0) {
+ 
+ void mvkValidateCeralArchiveDefinitions() {
+ 	[[maybe_unused]] size_t missingBytes = 0;
+-	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::CompilerMSL::Options>(9);
++	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::CompilerMSL::Options>(7);
+ 	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::MSLShaderInterfaceVariable>(3);
+ 	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::MSLResourceBinding>();
+ 	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::MSLConstexprSampler>();
+ 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVWorkgroupSizeDimension>(3);
+ 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVEntryPoint>(20);						// Contains string
+-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionOptions>(27);			// Contains string
++	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionOptions>(29);			// Contains string
+ 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLShaderInterfaceVariable>(6);
+ 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLResourceBinding>(2);
+ 	missingBytes += mvkValidateCerealArchiveSize<mvk::DescriptorBinding>();
+-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(107);	// Contains collection
+-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(40);		// Contains collection
++	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(109);	// Contains collection
++	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(39);		// Contains collection
+ 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLSpecializationMacroInfo>(22);			// Contains string
+ 	missingBytes += mvkValidateCerealArchiveSize<MVKShaderModuleKey>();
+ 	missingBytes += mvkValidateCerealArchiveSize<MVKCompressor<std::string>>(20);				// Contains collection
+diff --git a/MoltenVK/MoltenVK/Layers/MVKExtensions.def b/MoltenVK/MoltenVK/Layers/MVKExtensions.def
+index cf7b1e99..77f418e0 100644
+--- a/MoltenVK/MoltenVK/Layers/MVKExtensions.def
++++ b/MoltenVK/MoltenVK/Layers/MVKExtensions.def
+@@ -137,6 +137,7 @@ MVK_EXTENSION(EXT_debug_marker,                         EXT_DEBUG_MARKER,
+ MVK_EXTENSION(EXT_debug_report,                         EXT_DEBUG_REPORT,                         INSTANCE, 10.11,  8.0,  1.0)
+ MVK_EXTENSION(EXT_debug_utils,                          EXT_DEBUG_UTILS,                          INSTANCE, 10.11,  8.0,  1.0)
+ MVK_EXTENSION(EXT_depth_clip_control,                   EXT_DEPTH_CLIP_CONTROL,                   DEVICE,   10.11,  8.0,  1.0)
++MVK_EXTENSION(EXT_depth_clip_enable,                    EXT_DEPTH_CLIP_ENABLE,                    DEVICE,   10.11,  8.0,  1.0)
+ MVK_EXTENSION(EXT_descriptor_indexing,                  EXT_DESCRIPTOR_INDEXING,                  DEVICE,   10.11,  8.0,  1.0)
+ MVK_EXTENSION(EXT_extended_dynamic_state,               EXT_EXTENDED_DYNAMIC_STATE,               DEVICE,   10.11,  8.0,  1.0)
+ MVK_EXTENSION(EXT_extended_dynamic_state2,              EXT_EXTENDED_DYNAMIC_STATE_2,             DEVICE,   10.11,  8.0,  1.0)
+diff --git a/MoltenVK/MoltenVK/Utility/MVKStateTracking.h b/MoltenVK/MoltenVK/Utility/MVKStateTracking.h
+index b704777b..5d39fdd5 100644
+--- a/MoltenVK/MoltenVK/Utility/MVKStateTracking.h
++++ b/MoltenVK/MoltenVK/Utility/MVKStateTracking.h
+@@ -172,6 +172,7 @@ enum class MVKNonVolatileImplicitBuffer : uint32_t {
+ 	DynamicOffset,
+ 	TextureOffset,
+ 	ViewRange,
++	DepthClip,
+ 	Count
+ };
+ 
+@@ -181,6 +182,7 @@ enum class MVKImplicitBuffer : uint32_t {
+ 	DynamicOffset = static_cast<uint32_t>(MVKNonVolatileImplicitBuffer::DynamicOffset),
+ 	TextureOffset = static_cast<uint32_t>(MVKNonVolatileImplicitBuffer::TextureOffset),
+ 	ViewRange     = static_cast<uint32_t>(MVKNonVolatileImplicitBuffer::ViewRange),
++	DepthClip     = static_cast<uint32_t>(MVKNonVolatileImplicitBuffer::DepthClip),
+ 
+ 	// Volatile implicit buffers
+ 	// These buffers are updated per draw call, and are therefore always considered dirty
+@@ -232,6 +234,7 @@ enum class MVKRenderStateFlag {
+ 	DepthBiasEnable,
+ 	DepthBounds,
+ 	DepthBoundsTestEnable,
++	DepthClampEnable,
+ 	DepthClipEnable,
+ 	DepthCompareOp,
+ 	DepthTestEnable,
+@@ -276,6 +279,20 @@ enum class MVKRenderStateEnableFlag {
+ 
+ using MVKRenderStateEnableFlags = MVKFlagList<MVKRenderStateEnableFlag>;
+ 
++enum class MVKDepthClipEnable : uint8_t {
++	False,
++	True,
++	NotClamp,
++};
++
++static inline bool mvkIsDepthClipEnabled(MVKDepthClipEnable depthClipEnable, bool depthClampEnable) {
++	switch (depthClipEnable) {
++		case MVKDepthClipEnable::True:     return true;
++		case MVKDepthClipEnable::NotClamp: return !depthClampEnable;
++		default:                           return false;
++	}
++}
++
+ struct MVKDepthBias {
+ 	float depthBiasConstantFactor;
+ 	float depthBiasClamp;
+@@ -327,6 +344,7 @@ struct MVKRenderStateData {
+ 	MVKPolygonMode polygonMode = MVKPolygonMode::Fill;
+ 	MVKLineRasterizationMode lineRasterizationMode = MVKLineRasterizationMode::Default;
+ 	MVKRenderStateEnableFlags enable;
++	MVKDepthClipEnable depthClipEnable = MVKDepthClipEnable::NotClamp;
+ 	float lineWidth = 1;
+ 	MVKColor32 blendConstants = {};
+ 	MVKDepthBias depthBias = {};
+diff --git a/MoltenVK/MoltenVK/Vulkan/vulkan.mm b/MoltenVK/MoltenVK/Vulkan/vulkan.mm
+index 198b8473..5aa39652 100644
+--- a/MoltenVK/MoltenVK/Vulkan/vulkan.mm
++++ b/MoltenVK/MoltenVK/Vulkan/vulkan.mm
+@@ -4128,7 +4128,7 @@ MVK_PUBLIC_VULKAN_SYMBOL void vkCmdSetDepthClampEnableEXT(
+ 	VkBool32                                    depthClampEnable) {
+ 
+     MVKTraceVulkanCallStart();
+-	MVKAddCmd(SetDepthClipEnable, commandBuffer, !depthClampEnable);
++	MVKAddCmd(SetDepthClampEnable, commandBuffer, depthClampEnable);
+     MVKTraceVulkanCallEnd();
+ }
+ 
+diff --git a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
+index b52730b2..dc9d28d6 100644
+--- a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
++++ b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
+@@ -370,6 +370,7 @@ MVK_PUBLIC_SYMBOL bool SPIRVToMSLConverter::convert(SPIRVToMSLConversionConfigur
+ 	conversionResult.resultInfo.needsDispatchBaseBuffer = pMSLCompiler && pMSLCompiler->needs_dispatch_base_buffer();
+ 	conversionResult.resultInfo.needsViewRangeBuffer = pMSLCompiler && pMSLCompiler->needs_view_mask_buffer();
+ 	conversionResult.resultInfo.needsXfbBuffer = pMSLCompiler && pMSLCompiler->needs_xfb_buffer();
++	conversionResult.resultInfo.needsDepthClipStateBuffer = pMSLCompiler && pMSLCompiler->needs_depth_clip_state_buffer();
+ 	conversionResult.resultInfo.usesPhysicalStorageBufferAddressesCapability = usesPhysicalStorageBufferAddressesCapability(pMSLCompiler);
+ 	populateSpecializationMacros(pMSLCompiler, conversionResult.resultInfo.specializationMacros);
+ 
+diff --git a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h
+index f8589bdc..ff6d9ab7 100644
+--- a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h
++++ b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h
+@@ -261,6 +261,7 @@ namespace mvk {
+ 		bool needsDispatchBaseBuffer = false;
+ 		bool needsViewRangeBuffer = false;
+ 		bool needsXfbBuffer = false;
++		bool needsDepthClipStateBuffer = false;
+ 		bool usesPhysicalStorageBufferAddressesCapability = false;
+ 		std::map<uint32_t, MSLSpecializationMacroInfo> specializationMacros;
+ 
