@@ -888,6 +888,9 @@ build_moltenvk() {
     if ! git apply --reverse --check "$PATCHES_DIR/moltenvk-patched-shader-cache-identity.patch" >/dev/null 2>&1; then
         git apply "$PATCHES_DIR/moltenvk-patched-shader-cache-identity.patch"
     fi
+    if ! git apply --reverse --check "$PATCHES_DIR/moltenvk-geometry-capability-limits.patch" >/dev/null 2>&1; then
+        git apply "$PATCHES_DIR/moltenvk-geometry-capability-limits.patch"
+    fi
     env -i PATH=$PATH HOME=$HOME LANG=en_US.UTF-8 SPIRV_CROSS_PATCHED="$SPIRV_CROSS_PATCHED" make $MVK_PLATFORM$DEBUG_FLAGS
     if [ "$PLATFORM" == "macos" ]; then
         $(xcrun --sdk $SDK --find lipo) "Package/$BUILD_CONFIGURATION/MoltenVK/dylib/macOS/libMoltenVK.dylib" -extract $ARCH -output "$PREFIX/lib/libMoltenVK.dylib"
