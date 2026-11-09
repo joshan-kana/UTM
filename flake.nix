@@ -30,5 +30,22 @@
           ];
         };
       });
+
+      packages = forDarwin (pkgs: {
+        default = pkgs.utm.overrideAttrs (
+          finalAttrs: previousAttrs: {
+            version = "5.0.8-graphics-preview.2";
+
+            src = pkgs.fetchurl {
+              url = "https://github.com/joshan-kana/UTM/releases/download/v${finalAttrs.version}/UTM.dmg";
+              hash = "sha256-xQAa5wTrIrhtwb383/qm4G8zJc7LujchqF7qTCTkVjw=";
+            };
+
+            meta = previousAttrs.meta // {
+              changelog = "https://github.com/joshan-kana/UTM/releases/tag/v${finalAttrs.version}";
+            };
+          }
+        );
+      });
     };
 }
