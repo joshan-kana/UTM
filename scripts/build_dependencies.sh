@@ -851,6 +851,7 @@ build_moltenvk() {
     fi
     git -C "$SPIRV_CROSS_PATCHED" checkout -f "$(cat "$MVK_DIR/ExternalRevisions/SPIRV-Cross_repo_revision")"
     git -C "$SPIRV_CROSS_PATCHED" apply "$PATCHES_DIR/spirv-cross-geometry.patch"
+    git -C "$SPIRV_CROSS_PATCHED" apply "$PATCHES_DIR/spirv-cross-depth-clip-enable.patch"
 
     pushd "$MVK_DIR"
     # for xcpretty if installed
@@ -880,6 +881,9 @@ build_moltenvk() {
     env -i PATH=$PATH HOME=$HOME LANG=en_US.UTF-8 ./fetchDependencies --$MVK_PLATFORM --spirv-cross-root "$SPIRV_CROSS_PATCHED" -v
     if ! git apply --reverse --check "$PATCHES_DIR/moltenvk-geometry-fan.patch" >/dev/null 2>&1; then
         git apply "$PATCHES_DIR/moltenvk-geometry-fan.patch"
+    fi
+    if ! git apply --reverse --check "$PATCHES_DIR/moltenvk-depth-clip-enable.patch" >/dev/null 2>&1; then
+        git apply "$PATCHES_DIR/moltenvk-depth-clip-enable.patch"
     fi
     env -i PATH=$PATH HOME=$HOME LANG=en_US.UTF-8 make $MVK_PLATFORM$DEBUG_FLAGS
     if [ "$PLATFORM" == "macos" ]; then
